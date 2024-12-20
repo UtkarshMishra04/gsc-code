@@ -225,11 +225,6 @@ class CEMPlanner(planners.Planner):
                     self.dynamics
                 )
 
-                for t, primitive in enumerate(action_skeleton):
-                    print("primitive:", primitive)
-                    print("primitive.idx_policy:", primitive.idx_policy)
-                    print("primitive.policy:", self.policies[primitive.idx_policy])
-
                 states, _ = self.dynamics.rollout(
                     t_observation,
                     action_skeleton,
@@ -237,10 +232,6 @@ class CEMPlanner(planners.Planner):
                     batch_size=num_samples,
                     time_index=True,
                 )
-
-                print("states:", states, states.shape)
-
-                assert False
 
                 # Evaluate trajectories.
                 p_success, values, _ = utils.evaluate_trajectory(

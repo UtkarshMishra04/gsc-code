@@ -194,6 +194,8 @@ def evaluate_planners(
                 record_timelapse=verbose,
             )
 
+            print("Planning time:", t_planner)
+
         env.set_state(state)
 
         if rewards.prod() > 0:

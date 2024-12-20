@@ -36,11 +36,11 @@ function eval_tamp_diffusion {
         args="${args} --path ${PLANNER_OUTPUT_PATH}_debug"
         args="${args} --verbose 1"
     else
-        args="${args} --num-eval 50"
+        args="${args} --num-eval 10"
         args="${args} --path ${PLANNER_OUTPUT_PATH}"
         args="${args} --verbose 0"
     fi
-    CMD="python scripts/eval/eval_tamp_diffusion_trans_hook_reach_done.py ${args}"
+    CMD="python scripts/eval/eval_tamp_diffusion_trans_rearrangement_push_done_closed_loop.py ${args}"
     run_cmd
 }
 
@@ -52,7 +52,11 @@ function run_planners {
             if [[ "${planner}" == daf_* ]]; then
                 POLICY_CHECKPOINTS+=("${POLICY_INPUT_PATH}/${planner}/${policy_env}/${CKPT}.pt")
             else
-                POLICY_CHECKPOINTS+=("${POLICY_INPUT_PATH}/${policy_env}/${CKPT}.pt")
+                if [[ "${policy_env}" == pick_hook ]]; then
+                    POLICY_CHECKPOINTS+=("${POLICY_INPUT_PATH}/pick/${CKPT}.pt")
+                else
+                    POLICY_CHECKPOINTS+=("${POLICY_INPUT_PATH}/${policy_env}/${CKPT}.pt")
+                fi
             fi
         done
 
@@ -61,7 +65,11 @@ function run_planners {
             if [[ "${planner}" == daf_* ]]; then
                 DIFFUSION_CHECKPOINTS+=("${SCOD_INPUT_PATH}/${planner}/${policy_env}/${CKPT}.pt")
             else
-                DIFFUSION_CHECKPOINTS+=("diffusion_models/v6_trans/unnormalized_${policy_env}/")
+                if [[ "${policy_env}" == pick_hook ]]; then
+                    DIFFUSION_CHECKPOINTS+=("diffusion_models/${VERSION}/unnormalized_pick_hook/")
+                else
+                    DIFFUSION_CHECKPOINTS+=("diffusion_models/${VERSION}/unnormalized_${policy_env}/")
+                fi
             fi
         done
 
@@ -78,6 +86,8 @@ function visualize_tamp {
 }
 
 SEED=100
+VERSION="v7_final_1"
+# VERSION="v6_trans"
 
 # Setup.
 DEBUG=0
@@ -106,7 +116,7 @@ ENVS=(
     # "hook_reach/tamp1"
     # "hook_reach/task0"
     # "hook_reach/task1"
-    "hook_reach/task2"
+    # "hook_reach/task2"
     # "hook_reach/task3"
     # "constrained_packing/tamp0"
     # "constrained_packing/task0"
@@ -116,9 +126,9 @@ ENVS=(
     # "rearrangement_push/task1"
     # "rearrangement_push/task2"
     # "rearrangement_push/task3"
-    # "rearrangement_push/task4"
+    "rearrangement_push/task4"
 )
-POLICY_ENVS=("pick" "place" "pull" "push")
+POLICY_ENVS=("pick" "place" "pull" "push" "pick_hook")
 CKPT="ckpt_model_200000"
 ENV_KWARGS="--closed-loop 1"
 if [[ `hostname` == "sc.stanford.edu" ]] || [[ `hostname` == "${GCP_LOGIN}" ]]; then

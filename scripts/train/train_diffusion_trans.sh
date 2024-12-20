@@ -51,10 +51,10 @@ NUM_EPISODES=50000
 # Evaluate policies.
 
 policy_envs=(
-    # "pick"
+    "pick"
     # "place"
     # "pull"
-    "push"
+    # "push"
 )
 experiments=(
     "20221024/decoupled_state" # "20220908/official"
@@ -76,8 +76,8 @@ for exp_name in "${experiments[@]}"; do
         for policy_env in "${policy_envs[@]}"; do
             EXP_NAME="${exp_name}/${ckpt}"
             POLICY_CHECKPOINT="models/${exp_name}/${policy_env}/${ckpt}.pt"
-            DATASET_CHECKPOINT="/ssdscratch/umishra31/temporal-policies-main/diffusion_datasets/obs_act_data_${policy_env}.pkl"
-            DIFFUSION_CHECKPOINT="diffusion_models/v7_trans/unnormalized_${policy_env}/"
+            DATASET_CHECKPOINT="/ssdscratch/umishra31/temporal-policies-main/diffusion_datasets/obs_act_data_"
+            DIFFUSION_CHECKPOINT="diffusion_models/v11_trans/unnormalized_"
             train_diffusion
         done
     done

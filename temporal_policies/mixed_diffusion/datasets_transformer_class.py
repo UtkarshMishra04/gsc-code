@@ -22,8 +22,8 @@ class MixedDiffusionDataset(Dataset):
         self.dataset_path = dataset_path
         self.obs_processor = obs_processor
 
-        self.eval_datapath = self.dataset_path.split(".")[0] + "_eval_random.pkl"
-        self.neg_eval_datapath = self.dataset_path.split(".")[0] + "_eval_random_neg.pkl"
+        self.eval_datapath = self.dataset_path.split(".")[0] + "_hook_eval_random.pkl"
+        self.neg_eval_datapath = self.dataset_path.split(".")[0] + "_hook_eval_random_neg.pkl"
 
         with open(self.eval_datapath, 'rb') as f:
             self.data = pickle.load(f)
@@ -110,6 +110,8 @@ class MixedDiffusionDataset(Dataset):
 
         if mode == "transition":
             data = np.concatenate([self.obs1, self.act, self.obs_indices, self.obs2], axis=1)
+        if mode == "inverse":
+            data = np.concatenate([self.obs1, self.obs2, self.obs_indices, self.act], axis=1)
         elif mode == "state":
             indices = np.random.permutation(len(self.obs1))
             data = self.obs1[indices]

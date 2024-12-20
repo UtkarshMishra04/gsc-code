@@ -313,7 +313,7 @@ class TableEnv(PybulletEnv):
                 projection_matrix=PROJECTION_MATRIX,
             ),
         }
-        self.render_mode = "default"
+        self.render_mode = "front_right"
 
         self._timelapse = recording.Recorder()
         self._recorder = recording.Recorder(recording_freq)

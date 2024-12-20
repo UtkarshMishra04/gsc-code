@@ -22,13 +22,15 @@ class MixedDiffusionDataset(Dataset):
         self.dataset_path = dataset_path
         self.obs_processor = obs_processor
 
-        self.eval_datapath = self.dataset_path.split(".")[0] + "_eval_random.pkl"
-        self.neg_eval_datapath = self.dataset_path.split(".")[0] + "_eval_random_neg.pkl"
+        self.eval_datapath = self.dataset_path.split(".")[0] + "_hook_eval_random.pkl"
+        self.neg_eval_datapath = self.dataset_path.split(".")[0] + "_hook_eval_random_neg.pkl"
 
         with open(self.eval_datapath, 'rb') as f:
             self.data = pickle.load(f)
             self.data = np.random.permutation(self.data).tolist()
-            self.data = self.data[:1000]
+            self.data = self.data[:10000]
+
+        # self.data = []
 
         with open(dataset_path, 'rb') as f:
             self.data.extend(pickle.load(f))
@@ -70,8 +72,8 @@ class MixedDiffusionDataset(Dataset):
 
             self.act.append(action)
 
-            if len(self.obs1) > 60000:
-                break
+            # if len(self.obs1) > 20000:
+            #     break
 
         self.obs1 = np.array(self.obs1)*2 # scale to [-1, 1] from [-1/2, 1/2]
         self.obs2 = np.array(self.obs2)*2 # scale to [-1, 1] from [-1/2, 1/2]

@@ -40,7 +40,7 @@ function eval_planner {
         args="${args} --path ${PLANNER_OUTPUT_PATH}_debug"
         args="${args} --verbose 1"
     else
-        args="${args} --num-eval 100"
+        args="${args} --num-eval 50"
         args="${args} --path ${PLANNER_OUTPUT_PATH}"
         args="${args} --verbose 0"
     fi
@@ -97,7 +97,7 @@ output_path="plots"
 # Evaluate planners.
 PLANNERS=(
 # Q-value / Latent dynamics.
-    # "policy_cem"
+    "policy_cem"
     # "random_cem"
     # "policy_shooting"
     # "random_shooting"
@@ -151,7 +151,7 @@ PLANNERS=(
 # )
 
 # Pybullet.
-exp_name="20220914/official"
+exp_name="20221024/decoupled_state"
 PLANNER_CONFIG_PATH="configs/pybullet/planners"
 ENVS=(
     ## Domain 1: Hook Reach
@@ -166,20 +166,21 @@ ENVS=(
     # "rearrangement_push/task0"
     # "rearrangement_push/task1"
     # "rearrangement_push/task2"
+    "rearrangement_push/task4"
 )
 POLICY_ENVS=("pick" "place" "pull" "push")
 checkpoints=(
     # "final_model"
     # "best_model"
-    "select_model"
+    # "select_model"
     # "ckpt_model_50000"
     # "ckpt_model_100000"
     # "ckpt_model_150000"
-    # "ckpt_model_200000"
+    "ckpt_model_200000"
     # "select_model"
     # "selectscod_model"
 )
-ENV_KWARGS="--closed-loop 1"
+ENV_KWARGS="--closed-loop 0"
 if [[ `hostname` == "sc.stanford.edu" ]] || [[ `hostname` == "${GCP_LOGIN}" ]]; then
     ENV_KWARGS="--gui 0"
 fi
@@ -203,7 +204,7 @@ if [[ `hostname` == "sc.stanford.edu" ]] || [[ `hostname` == "${GCP_LOGIN}" ]] |
     exit
 fi
 
-for ckpt in "${checkpoints[@]}"; do
-    PLANNER_OUTPUT_PATH="${output_path}/${exp_name}/${ckpt}"
-    visualize_results
-done
+# for ckpt in "${checkpoints[@]}"; do
+#     PLANNER_OUTPUT_PATH="${output_path}/${exp_name}/${ckpt}"
+#     visualize_results
+# done

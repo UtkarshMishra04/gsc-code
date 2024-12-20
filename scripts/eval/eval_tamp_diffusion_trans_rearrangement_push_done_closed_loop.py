@@ -14,6 +14,8 @@ import tqdm
 import json
 from PIL import Image
 
+import time
+
 from temporal_policies import dynamics, agents, envs, planners, agents
 from temporal_policies.envs.pybullet.table import primitives as table_primitives
 from temporal_policies.utils import recording, timing, random, tensors
@@ -98,7 +100,8 @@ def get_action_from_multi_diffusion(
     end_index: int = 24,
     state_dim: int = 96,
     action_dim: int = 4,
-    gamma: Sequence[float] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    num_steps: int = 256,
+    gamma: Sequence[float] = [1.0, 0.5, 1.0, 1.0, 1.0, 0.0, 0.5, 1.0, 1.0, 0.5, 1.0],
     device: torch.device = "auto"
 ) -> np.ndarray:
 
@@ -112,7 +115,7 @@ def get_action_from_multi_diffusion(
         transition_model.to(device)
         classifier.to(device)
 
-    num_steps = 256
+    num_steps = num_steps
     sample_dim = 0
     for i in range(len(policies)):
         sample_dim += state_dim + action_dim
@@ -129,6 +132,9 @@ def get_action_from_multi_diffusion(
 
     all_observation_indices = []
     all_reverse_observation_indices = []
+
+    print("action_skeleton:", len(action_skeleton))
+    print("policies:", len(policies))
 
     for i in range(len(policies)):
         observation_indices = np.array(action_skeleton[i].get_policy_args()["observation_indices"])
@@ -156,6 +162,14 @@ def get_action_from_multi_diffusion(
         all_obs_ind.append(obs_ind)
         all_reverse_obs_ind.append(reverse_obs_ind)
 
+    full_next_state_sequence = []
+
+    target_state_indices = (indices_dms[0][1] - state_dim, indices_dms[0][1])
+
+    full_next_state_sequence.append(xt[:, target_state_indices[0]:target_state_indices[1]].clone().detach().cpu().numpy())
+
+    start_time = time.time()
+
     for t in tqdm.tqdm(range(num_steps, 0, -1)):
 
         total_epsilon = torch.zeros_like(xt)
@@ -177,24 +191,12 @@ def get_action_from_multi_diffusion(
                 #     pred_x0[:, :state_dim] = x0
 
                 pred_x0[:, -state_dim+36:] = pred_x0[:, 36:state_dim]
-
-            # if i == 0:
-            #     current_state = pred_x0[:, :state_dim].detach()
-            #     current_action = pred_x0[:, state_dim:state_dim+action_dim].detach()
-            #     current_action = current_action.clone()
-            #     current_action.requires_grad = True
-            #     next_state = transition_model(torch.cat([current_state, current_action, obs_ind], dim=1))
-            #     target_next_state = pred_x0[:, state_dim+action_dim:]
-            #     loss = F.mse_loss(next_state, target_next_state)
-            #     loss.backward()
-            #     current_action = current_action.detach() - 0.5*current_action.grad.detach()
-            #     pred_x0[:, state_dim:state_dim+action_dim] = current_action
             
             with torch.no_grad():
-                if use_transition_model:
+                if use_transition_model: # or i % 2 == 0:
                     pred_x0[:, state_dim+action_dim:] = transition_model(torch.cat([pred_x0[:, :state_dim+action_dim], obs_ind], dim=1))
 
-                pred_x0 = torch.clip(pred_x0, -1, 1)
+                # pred_x0 = torch.clip(pred_x0, -1, 1)
 
                 epsilon = (sample - torch.sqrt(alpha_t)*pred_x0) / torch.sqrt(1 - alpha_t)
 
@@ -210,103 +212,56 @@ def get_action_from_multi_diffusion(
 
         pred_x0 = (xt - torch.sqrt(1 - alpha_t)*total_epsilon) / torch.sqrt(alpha_t)
 
-        # pred_x0[:, :state_dim] = transform_backward(pred_x0[:, :state_dim], reverse_observation_indices)
-        # pred_x0[:, state_dim+action_dim:] = transform_backward(pred_x0[:, state_dim+action_dim:], reverse_observation_indices)
-
         pred_x0[:, :state_dim] = mod_x0[:state_dim]
 
         for i in range(len(indices_sdms)):
             pred_x0[:, indices_sdms[i][0]+12:indices_sdms[i][0]+end_index] = mod_x0[12:end_index]
             pred_x0[:, indices_sdms[i][0]+12*num_objects:indices_sdms[i][0]+state_dim] = mod_x0[12*num_objects:state_dim]
 
+            # if i < 5:
+            #     pred_x0[:, indices_sdms[i][0]+36:indices_sdms[i][0]+48] = mod_x0[36:48]
+
         pred_x0[:, -state_dim+12:-state_dim+end_index] = mod_x0[12:end_index]
         pred_x0[:, -state_dim+12*num_objects:] = mod_x0[12*num_objects:]
 
-        if t > 0.25*num_steps:
-            action1 = pred_x0[:, (state_dim+action_dim)+state_dim:2*(state_dim+action_dim)]
-            action2 = pred_x0[:, 3*(state_dim+action_dim)+state_dim:4*(state_dim+action_dim)]
-            action3 = pred_x0[:, 5*(state_dim+action_dim)+state_dim:6*(state_dim+action_dim)]
-            # action4 = pred_x0[:, 7*(state_dim+action_dim)+state_dim:8*(state_dim+action_dim)]
+        # for i in range(len(indices_dms)):
+        #     state_1 = pred_x0[:, indices_dms[i][0]:indices_dms[i][0]+state_dim].clone()
+        #     state_2 = pred_x0[:, indices_dms[i][1]-state_dim:indices_dms[i][1]].clone()
 
-            # maximize distance between actions
+        #     state_1 = transform_forward(state_1, all_observation_indices[i])
+        #     state_2 = transform_forward(state_2, all_observation_indices[i])
 
-            for _ in range(5):
+        #     state_2[:, 36:] = state_1[:, 36:]
 
-                action1 = action1.detach()
+        #     state_1 = transform_backward(state_1, all_reverse_observation_indices[i])
+        #     state_2 = transform_backward(state_2, all_reverse_observation_indices[i])
 
-                action1.requires_grad = True
-
-                distance = torch.norm(action2[:, :2] - action1[:, :2], dim=1).mean()
-
-                distance.backward()
-
-                action1_grad = action1.grad.clone()
-
-                action1 = action1.detach()
-
-                action1[:, :2] = action1[:, :2] + action1_grad[:, :2]
-
-            for _ in range(5):
-
-                action2 = action2.detach()
-
-                action2.requires_grad = True
-
-                distance = torch.norm(action1[:, :2] - action2[:, :2], dim=1).mean()
-
-                distance.backward()
-
-                action2_grad = action2.grad.clone()
-
-                action2 = action2.detach()
-
-                action2[:, :2] = action2[:, :2] + action2_grad[:, :2]
-
-            for _ in range(5):
-
-                action3 = action3.detach()
-
-                action3.requires_grad = True
-
-                distance = torch.norm(action1[:, :2] - action3[:, :2], dim=1) + torch.norm(action2[:, :2] - action3[:, :2], dim=1)
-
-                distance = distance.mean()
-
-                distance.backward()
-
-                action3_grad = action3.grad.clone()
-
-                action3 = action3.detach()
-
-                action3[:, :2] = action3[:, :2] + action3_grad[:, :2]
-
-            # for _ in range(5):
-
-            #     action4 = action4.detach()
-
-            #     action4.requires_grad = True
-
-            #     distance = torch.norm(action1[:, :2] - action4[:, :2], dim=1) + torch.norm(action2[:, :2] - action4[:, :2], dim=1) + torch.norm(action3[:, :2] - action4[:, :2], dim=1)
-
-            #     distance = distance.mean()
-
-            #     distance.backward()
-
-            #     action4_grad = action4.grad.clone()
-
-            #     action4 = action4.detach()
-
-            #     action4[:, :2] = action4[:, :2] + action4_grad[:, :2]
-
-            pred_x0[:, 3*(state_dim+action_dim)+state_dim:4*(state_dim+action_dim)] = action2
-            pred_x0[:, 5*(state_dim+action_dim)+state_dim:6*(state_dim+action_dim)] = action3
-            # pred_x0[:, 7*(state_dim+action_dim)+state_dim:8*(state_dim+action_dim)] = action4
-
+        #     pred_x0[:, indices_dms[i][0]:indices_dms[i][0]+state_dim] = state_1
+        #     pred_x0[:, indices_dms[i][1]-state_dim:indices_dms[i][1]] = state_2
+            
         with torch.no_grad():
+
+            pred_x0 = torch.clip(pred_x0, -1, 1)
 
             new_epsilon = torch.randn_like(total_epsilon)
 
             xt = torch.sqrt(alpha_tm1)*pred_x0 + torch.sqrt(1 - alpha_tm1)*new_epsilon
+
+            full_next_state_sequence.append(xt[:, target_state_indices[0]:target_state_indices[1]].clone().detach().cpu().numpy())
+
+    end_time = time.time()
+
+    try:
+        action = xt[:, -3*(state_dim+action_dim):-2*(state_dim+action_dim)-state_dim].clone()
+
+        action[:, 0] = -action[:, 0]
+        action[:, 1] = -action[:, 1]
+
+        action = torch.clip(action, -1, 1)
+
+        xt[:, -3*(state_dim+action_dim):-2*(state_dim+action_dim)-state_dim] = action
+    except:
+        pass
 
     xt = xt.detach().cpu().numpy()
 
@@ -333,6 +288,10 @@ def get_action_from_multi_diffusion(
 
     sorted_indices = np.argsort(scores)[::-1][:5]
 
+    selected_next_state_sequence = [
+        full_next_state_sequence[i][sorted_indices[0]] for i in range(len(full_next_state_sequence))
+    ]
+
     xt = xt[sorted_indices]
 
     all_states = []
@@ -344,7 +303,7 @@ def get_action_from_multi_diffusion(
     
     all_states.append(xt[:, -state_dim:]*0.5)
 
-    return all_actions, all_states
+    return all_actions, all_states, selected_next_state_sequence, end_time - start_time
 
 def evaluate_episodes(
     env: envs.Env,
@@ -376,6 +335,8 @@ def evaluate_episodes(
 
     device = torch.device(device)
 
+    given_skill_sequence = target_skill_sequence.copy()
+
     current_skill = skills[target_skill_sequence[0]]
 
     policy = policies[current_skill]
@@ -397,25 +358,17 @@ def evaluate_episodes(
 
     # remove all gif files from path
     for f in path.iterdir():
-        if f.suffix == ".gif" or f.suffix == ".png":
+        if f.suffix == ".gif" or f.suffix == ".png" or f.suffix == ".pkl":
             f.unlink()
 
     all_rewards = None
 
-    index = 0
-
-    skip_index = 10
+    it = 0
 
     for ep in pbar:
 
         # Evaluate episode.
         observation, reset_info = env.reset() #seed=seed)
-
-        index += 1
-        
-        if index < skip_index:
-            continue
-
         print("reset_info:", reset_info, "env.task", env.task)
         seed = reset_info["seed"]
         initial_observation = observation
@@ -426,145 +379,144 @@ def evaluate_episodes(
         rewards = []
         done = False
 
-        obs0 = obs_preprocessor(observation, reset_info["policy_args"])
-        policy_action = query_policy_actor(policy, observation, reset_info["policy_args"])
+        i = 0
+        target_skill_sequence = given_skill_sequence.copy()
+        target_length = len(target_skill_sequence)
 
-        target_skill_sequence = target_skill_sequence[:target_length]
+        # env.record_start()
 
-        # actions, pred_states = get_action_from_diffusion(
-        #     policy,
-        #     diffusion_model_transition,
-        #     transition_model,
-        #     score_model_classifier,
-        #     obs0,
-        #     observation_indices=observation_indices,
-        #     use_transition_model=False,
-        #     device=device
-        # )
+        images = []
 
-        print("Considering skills:", skills[target_skill_sequence[0]], skills[target_skill_sequence[1]])
+        # images.append(env.render())
 
-        # actions, pred_states = get_action_from_two_diffusion(
-        #     policies[skills[target_skill_sequence[0]]],
-        #     policies[skills[target_skill_sequence[1]]],
-        #     diffusion_models[skills[target_skill_sequence[0]]],
-        #     diffusion_models[skills[target_skill_sequence[1]]],
-        #     transition_models[skills[target_skill_sequence[0]]],
-        #     transition_models[skills[target_skill_sequence[1]]],
-        #     classifier_models[skills[target_skill_sequence[0]]],
-        #     classifier_models[skills[target_skill_sequence[1]]],
-        #     obs0,
-        #     observation_indices1=np.array(env.action_skeleton[0].get_policy_args()["observation_indices"]),
-        #     observation_indices2=np.array(env.action_skeleton[1].get_policy_args()["observation_indices"]),
-        #     use_transition_model=False,
-        #     device=device
-        # )
+        all_successive_states = []
 
-        actions, pred_states = get_action_from_multi_diffusion(
-            policies=[policies[skills[i]] for i in target_skill_sequence],
-            diffusion_models=[diffusion_models[skills[i]] for i in target_skill_sequence],
-            transition_models=[transition_models[skills[i]] for i in target_skill_sequence],
-            classifiers=[classifier_models[skills[i]] for i in target_skill_sequence],
-            obs0=obs0,
-            action_skeleton=env.action_skeleton,
-            use_transition_model=False,
-            num_objects=7,
-            end_index=36,
-            device=device
-        )
+        # import pickle
 
-        if verbose:
-            print("observation:", observation_str(env, observation))
-            print("observation tensor:", observation)
-            # print("action:", action_str(env, action))
+        # with open(path / f"eval_{ep}_7_success.pkl", "rb") as f:
+        #     all_successive_states, initial_observation = pickle.load(f)
 
-        print("actions:", actions)
-        print("policy_action:", policy_action)
+        # env.set_observation(initial_observation)
 
-        for j in range(actions[0].shape[0]):
+        # print("all_successive_states:", len(all_successive_states), len(all_successive_states[0]), all_successive_states[0][0].shape)
 
-            all_true_images = []
+        # for i in tqdm.tqdm(range(len(all_successive_states))):
 
-            env.reset(seed=seed)
-            env.set_observation(initial_observation)
+        #     folder_name = "step_" + str(i)
 
-            env.record_start()
+        #     for j in tqdm.tqdm(range(len(all_successive_states[i]))):
 
-            all_true_images.append(env.render())
+        #         file_name = "state_" + str(j) + ".png"
 
-            rewards = []
+        #         state = all_successive_states[i][j]
 
-            print("#########################################################################################")
+        #         curr_state = state.reshape(8, 12)
+        #         curr_state = policy.encoder.unnormalize(torch.Tensor(curr_state).unsqueeze(0).to(device)).detach().cpu().numpy()[0]
+        #         env.set_observation(curr_state)
+        #         img = Image.fromarray(env.render())
 
-            for i, action in enumerate(actions):
+        #         if not (path / folder_name).exists():
+        #             (path / folder_name).mkdir(parents=True)
 
-                env.set_primitive(env.action_skeleton[i])
+        #         img.save(path / folder_name / file_name)
+
+        # assert False
+
+        all_planner_times = []
+
+        while not done:
+
+            target_skill_sequence = target_skill_sequence[-target_length:]
+
+            print("target_skill_sequence:", target_skill_sequence)
+
+            if len(target_skill_sequence) == 0:
+                done = True
+                break
+
+            env.set_primitive(env.action_skeleton[i])
+
+            observation = env.get_observation()
+
+            obs0 = obs_preprocessor(observation, env.action_skeleton[i].get_policy_args())
+            policy_action = query_policy_actor(policy, observation, env.action_skeleton[i].get_policy_args())
+
+            actions, pred_states, selected_next_state_sequence, t_planner = get_action_from_multi_diffusion(
+                policies=[policies[skills[i]] for i in target_skill_sequence],
+                diffusion_models=[diffusion_models[skills[i]] for i in target_skill_sequence],
+                transition_models=[transition_models[skills[i]] for i in target_skill_sequence],
+                classifiers=[classifier_models[skills[i]] for i in target_skill_sequence],
+                obs0=obs0,
+                action_skeleton=env.action_skeleton[i:],
+                use_transition_model=False,
+                num_objects=5,
+                end_index=36,
+                device=device,
+                num_steps=128,
+            )
+
+            all_planner_times.append(t_planner)
+
+            all_successive_states.append(selected_next_state_sequence)
+
+            current_observation = env.get_observation()
+            current_state = env.get_state()
+
+            for a in range(actions[0].shape[0]):
+                action = actions[0][a]
+
+                env.set_observation(current_observation)
+                env.set_state(current_state)
 
                 try:
-                    # action = policy_action
-                    observation, reward, terminated, truncated, step_info = env.step(action[j])
-                    all_true_images.append(env.render())
+                    observation, reward, terminated, truncated, step_info = env.step(action)
                 except Exception as e:
-                    continue
+                    done = True
+                    assert False, e
 
-                if verbose:
-                    print("step_info:", step_info)
-                    
-                print(f"Action for: {skills[target_skill_sequence[i]]}, reward: {reward}, terminated: {terminated}, truncated: {truncated}")
+                if reward > 0:
+                    # images.append(env.render())
+                    break
 
-                rewards.append(reward)
-                done = terminated or truncated
+            print("Executing action:", env.action_skeleton[i], "reward:", reward, "terminated:", terminated, "truncated:", truncated, "step_info:", step_info)
 
-            success = np.prod(rewards) > 0
+            i += 1
+            target_length -= 1
 
-            env.record_stop()
+            rewards.append(reward)
+            print("rewards:", rewards, len(rewards), len(env.action_skeleton))
 
-            if success:
-                env.record_save(path / f"eval_{ep}_{i}_{j}_success.gif", reset=True)
+            if reward == 0 or len(rewards) == len(env.action_skeleton):
+                done = True
 
-                imgs = []
+        print("all_planner_times:", all_planner_times)
 
-                for state in pred_states:
-                    curr_state = state[j].reshape(8, 12)
-                    curr_state = policy.encoder.unnormalize(torch.Tensor(curr_state).unsqueeze(0).to(device)).detach().cpu().numpy()[0]
-                    env.set_observation(curr_state)
-                    imgs.append(env.render())
+        success = rewards[-1] > 0
 
-                imgs = np.concatenate(imgs, axis=1)
+        # env.record_stop()
 
-                Image.fromarray(imgs).save(path / f"eval_{ep}_{i}_{j}_success.png")         
+        # imgs = np.concatenate(images, axis=1)
 
-                all_true_images = np.concatenate(all_true_images, axis=1)
+        # if success:
+        #     env.record_save(path / f"eval_{ep}_{i}_success.gif", reset=True)
+        #     Image.fromarray(imgs).save(path / f"eval_{ep}_{i}_success.png") 
+        #     import pickle
 
-                Image.fromarray(all_true_images).save(path / f"eval_{ep}_{i}_{j}_true.png")     
-
-            else:
-                env.record_save(path / f"eval_{ep}_{i}_{j}_fail.gif", reset=True)
-
-                imgs = []
-
-                for state in pred_states:
-                    curr_state = state[j].reshape(8, 12)
-                    curr_state = policy.encoder.unnormalize(torch.Tensor(curr_state).unsqueeze(0).to(device)).detach().cpu().numpy()[0]
-                    env.set_observation(curr_state)
-                    imgs.append(env.render())
-
-                imgs = np.concatenate(imgs, axis=1)
-
-                Image.fromarray(imgs).save(path / f"eval_{ep}_{i}_{j}_fail.png")   
-
-            if success:
-                env.set_observation(initial_observation)
-                break
-            else:
-                env.set_observation(initial_observation)
-
-            print("#########################################################################################")
+        #     with open(path / f"eval_{ep}_{i}_success.pkl", "wb") as f:
+        #         pickle.dump((all_successive_states, initial_observation), f)
+        # else:
+        #     env.record_save(path / f"eval_{ep}_{i}_fail.gif", reset=True)
+        #     Image.fromarray(imgs).save(path / f"eval_{ep}_{i}_fail.png") 
 
         if all_rewards is None:
             all_rewards = np.array(rewards)
         else:
-            all_rewards += np.array(rewards)
+            shape1 = all_rewards.shape[0]
+            rewards = np.array(rewards)
+            shape2 = rewards.shape[0]
+            if shape1 > shape2:
+                rewards = np.pad(rewards, (0, shape1 - shape2), "constant", constant_values=0)
+            all_rewards += rewards
 
         num_successes += success
         pbar.set_postfix(
@@ -622,7 +574,7 @@ def evaluate_diffusion(
         env = None
         assert False
 
-    all_skills = ["pick", "place", "pull", "push"]
+    all_skills = ["pick", "place", "pull", "push", "pick_hook"]
     all_policies = {}
     all_diffusion_models = {}
     all_diffusion_state_models = {}
@@ -689,7 +641,7 @@ def evaluate_diffusion(
         all_classifier_models[all_skills[i]] = score_model_classifier
         all_observation_preprocessors[all_skills[i]] = observation_preprocessor
 
-    target_skill_sequence = [0, 1, 0, 1, 0, 1] #, 0, 1]
+    target_skill_sequence = [4, 2, 1, 0, 1, 4, 3] #1, 0, 1, 0, 3]
     target_length = len(target_skill_sequence)
     num_episodes = num_eval
 

@@ -271,12 +271,15 @@ class Pick(Primitive):
         if not allow_collisions:
             did_non_args_move = self.create_non_arg_movement_check(objects)
         try:
+
+            print("pick: going to pre-pick pose", pre_pos, command_quat)
             robot.goto_pose(pre_pos, command_quat)
             if not allow_collisions and did_non_args_move():
                 raise ControlException(
                     f"Robot.goto_pose({pre_pos}, {command_quat}) collided"
                 )
 
+            print("pick: going to pick pose", command_pos, command_quat)
             robot.goto_pose(
                 command_pos,
                 command_quat,
@@ -288,6 +291,7 @@ class Pick(Primitive):
             if not robot.grasp_object(obj):
                 raise ControlException(f"Robot.grasp_object({obj}) failed")
 
+            print("pick: going to pre-pick pose", pre_pos, command_quat)
             robot.goto_pose(pre_pos, command_quat)
             if not allow_collisions and did_non_args_move():
                 raise ControlException(
@@ -343,7 +347,7 @@ class Place(Primitive):
 
         # Parse action.
         a = primitive_actions.PlaceAction(self.scale_action(action))
-        print("Place.execute() parsed action:\n", a)
+        # print("Place.execute() parsed action:\n", a)
         dbprint(a)
 
         obj, target = self.arg_objects
@@ -394,14 +398,16 @@ class Place(Primitive):
         if not allow_collisions:
             did_non_args_move = self.create_non_arg_movement_check(objects)
         try:
+            print("place: going to pre-place pose", pre_pos, command_quat)
             robot.goto_pose(pre_pos, command_quat)
             if not allow_collisions and did_non_args_move():
                 raise ControlException(
                     f"Robot.goto_pose({pre_pos}, {command_quat}) collided"
                 )
 
-            print("robot at pre pose, about to goto command pose")
+            # print("robot at pre pose, about to goto command pose")
 
+            print("place: going to command pose", command_pos, command_quat)
             robot.goto_pose(
                 command_pos,
                 command_quat,
@@ -409,7 +415,7 @@ class Place(Primitive):
                 + [obj.body_id for obj in self.get_non_arg_objects(objects)],
             )
 
-            print("robot at command pose, about to place")
+            # print("robot at command pose, about to place")
 
             # Make sure object won't drop from too high.
             # if not real_world and not utils.is_within_distance(
@@ -418,13 +424,15 @@ class Place(Primitive):
             #     print("Object dropped from too high.")
             #     raise ControlException("Object dropped from too high.")
 
+            print("robot at command pose, about to grasp(0)")
             robot.grasp(0)
             if not allow_collisions and did_non_args_move():
                 print("Robot.grasp(0) collided")
                 raise ControlException("Robot.grasp(0) collided")
 
-            print("robot placed, about to goto pre pose")
+            # print("robot placed, about to goto pre pose")
 
+            print("place: going to pre-place pose", pre_pos, command_quat)
             robot.goto_pose(pre_pos, command_quat)
             if not allow_collisions and did_non_args_move():
                 print(f"Robot.goto_pose({pre_pos}, {command_quat}) collided")
@@ -534,12 +542,14 @@ class Pull(Primitive):
         if not allow_collisions:
             did_non_args_move = self.create_non_arg_movement_check(objects)
         try:
+            print("pre reach object", pre_pos, command_pose_reach.quat)
             robot.goto_pose(pre_pos, command_pose_reach.quat)
             if not self.ALLOW_COLLISIONS and did_non_args_move():
                 raise ControlException(
                     f"Robot.goto_pose({pre_pos}, {command_pose_reach.quat}) collided"
                 )
 
+            print("reaching object", command_pose_reach.pos, command_pose_pull.quat)
             robot.goto_pose(
                 command_pose_reach.pos,
                 command_pose_reach.quat,
@@ -552,6 +562,7 @@ class Pull(Primitive):
             if not real_world and not utils.is_upright(target):
                 raise ControlException("Target is not upright", target.pose().quat)
 
+            print("pulling object", command_pose_pull.pos, command_pose_pull.quat)
             robot.goto_pose(
                 command_pose_pull.pos,
                 command_pose_pull.quat,
@@ -565,6 +576,7 @@ class Pull(Primitive):
                 # No objects should move after lifting the hook.
                 did_non_args_move = self.create_non_arg_movement_check(objects)
 
+            print("post reach object", post_pos, command_pose_pull.quat)
             robot.goto_pose(post_pos, command_pose_pull.quat)
             if did_non_args_move():
                 raise ControlException(

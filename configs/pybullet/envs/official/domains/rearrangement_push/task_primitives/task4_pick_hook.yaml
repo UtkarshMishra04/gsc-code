@@ -11,17 +11,15 @@ env_kwargs:
 
   tasks:
     - action_skeleton:
-        - pick(cyan_box, table)
-        - place(cyan_box, table)
         - pick(hook, table)
-        - push(cyan_box, hook, rack)
       initial_state:
         - free(hook)
         - free(cyan_box)
         - aligned(rack)
         - poslimit(rack)
         - inworkspace(hook)
-        - inworkspace(cyan_box)
+        # - inworkspace(cyan_box)
+        - beyondworkspace(cyan_box)
         - beyondworkspace(rack)
         - nonblocking(rack, hook)
         - on(rack, table)

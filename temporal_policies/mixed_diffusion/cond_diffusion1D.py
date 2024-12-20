@@ -120,3 +120,13 @@ class Diffusion(Module):
         ones = torch.ones(num_samples, 1).to(x_T)/num_steps
 
         return sde, ones
+
+    def configure_sdes_forward(self, num_steps, x_0, num_samples=1):
+
+        sde = self.gensde
+        delta = sde.T / num_steps
+        sde.base_sde.dt = delta
+        ts = torch.linspace(1, 0, num_steps + 1).to(x_0) * sde.T
+        ones = torch.ones(num_samples, 1).to(x_0)/num_steps
+
+        return sde, ones

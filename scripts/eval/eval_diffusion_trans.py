@@ -91,6 +91,36 @@ def modify_gradient_classifier(
 
     return samples
 
+@torch.no_grad()
+def diffusion_forward(
+    diffusion_model: Diffusion,
+    samples: np.ndarray,
+    device: torch.device = "auto"
+):
+
+    if device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    num_steps = 256
+
+    samples = torch.Tensor(samples).to(device)
+    diffusion_model = diffusion_model.to(device)
+
+    sde, ones = diffusion_model.configure_sdes_forward(num_steps=num_steps, x_0=samples)
+
+    all_samples = [samples.cpu().unsqueeze(1).numpy()]
+
+    for t in range(num_steps):
+
+        new_samples = diffusion_model.gensde.base_sde.sample(t*ones, samples)
+
+        all_samples.append(new_samples.cpu().unsqueeze(1).numpy())
+
+    all_samples = np.concatenate(all_samples, axis=0)
+
+    return all_samples[:, 0, :][::-1][-50:]
+
+
 def get_action_from_diffusion(
     policy,
     diffusion_model: Diffusion,
@@ -126,16 +156,6 @@ def get_action_from_diffusion(
     for t in tqdm.tqdm(range(num_steps, 0, -1)):
 
         epsilon, alpha_t, alpha_tm1 = sde.sample_epsilon(t * ones, xt, observation_indices)
-
-        with open(f"check_data/epsilon_{t}.pkl", "wb") as f:
-            pickle.dump((
-                xt.detach().cpu().numpy(),
-                observation_indices.detach().cpu().numpy(),
-                epsilon.detach().cpu().numpy(),
-                alpha_t.detach().cpu().numpy(),
-                alpha_tm1.detach().cpu().numpy()
-            ), f
-            )
         
         pred = (xt - torch.sqrt(1 - alpha_t)*epsilon) / torch.sqrt(alpha_t)
         
@@ -172,12 +192,6 @@ def get_action_from_diffusion(
         
         xt = torch.sqrt(alpha_tm1)*pred_x0 + torch.sqrt(1 - alpha_tm1)*new_epsilon
 
-        with open(f"check_data/new_epsilon_{t}.pkl", "wb") as f:
-            pickle.dump((
-                new_epsilon.detach().cpu().numpy()
-            ), f
-            )
-
     xt = xt.detach().cpu().numpy()
 
     initial_state, action, final_state = xt[:, :state_dim], xt[:, state_dim:state_dim+action_dim], xt[:, state_dim+action_dim:]
@@ -195,9 +209,6 @@ def get_action_from_diffusion(
 
     import pickle
 
-    with open("result_xt.pkl", "wb") as f:
-        pickle.dump(xt, f)
-
     initial_state, action, final_state = xt[:, :state_dim], xt[:, state_dim:state_dim+action_dim], xt[:, state_dim+action_dim:]
 
     print("initial_state:", initial_state[0])
@@ -207,7 +218,7 @@ def get_action_from_diffusion(
 
     # assert False, use_transition_model
 
-    return action, final_state*0.5
+    return action, final_state*0.5, initial_state*0.5
 
 def evaluate_episodes(
     env: envs.Env,
@@ -254,6 +265,7 @@ def evaluate_episodes(
         print("reset_info:", reset_info, "env.task", env.task)
         seed = reset_info["seed"]
         initial_observation = observation
+        init_state = env.get_state()
         observation_indices = reset_info["policy_args"]["observation_indices"]
         if verbose:
             print("primitive:", env.get_primitive())
@@ -266,7 +278,7 @@ def evaluate_episodes(
             obs0 = obs_preprocessor(observation, reset_info["policy_args"])
             policy_action = query_policy_actor(policy, observation, reset_info["policy_args"])
 
-            actions, pred_states = get_action_from_diffusion(
+            actions, pred_states, initial_states = get_action_from_diffusion(
                 policy,
                 diffusion_model_transition,
                 transition_model,
@@ -277,16 +289,16 @@ def evaluate_episodes(
                 device=device
             )
 
-            actions_dummy, pred_states_wo_transition = get_action_from_diffusion(
-                policy,
-                diffusion_model_transition,
-                transition_model,
-                score_model_classifier,
-                obs0,
-                observation_indices=observation_indices,
-                use_transition_model=True,
-                device=device
-            )
+            # actions_dummy, pred_states_wo_transition = get_action_from_diffusion(
+            #     policy,
+            #     diffusion_model_transition,
+            #     transition_model,
+            #     score_model_classifier,
+            #     obs0,
+            #     observation_indices=observation_indices,
+            #     use_transition_model=True,
+            #     device=device
+            # )
 
             if verbose:
                 print("observation:", observation_str(env, observation))
@@ -318,18 +330,19 @@ def evaluate_episodes(
                 rewards.append(reward)
                 done = terminated or truncated
 
-                predicted_observation = transition_model(torch.Tensor(np.concatenate([obs0, action, observation_indices])).unsqueeze(0).to(device)).detach().cpu()
-                predicted_score_0 = score_model_classifier(torch.Tensor(np.concatenate([obs0, observation_indices])).unsqueeze(0).to(device)).detach()
-                predicted_score_1 = score_model_classifier(torch.cat([predicted_observation.clone(), torch.Tensor(observation_indices).unsqueeze(0)], dim=-1).to(device)).detach().cpu()
-                predicted_observation = policy.encoder.decode(predicted_observation.to(device), reset_info["policy_args"]).cpu().numpy()
-                diffusion_next_observation = policy.encoder.decode(torch.Tensor(pred_states[j]).unsqueeze(0).to(device), reset_info["policy_args"]).cpu().numpy()
-                diffusion_next_observation_wo_transition = policy.encoder.decode(torch.Tensor(pred_states_wo_transition[j]).unsqueeze(0).to(device), reset_info["policy_args"]).cpu().numpy()
+                # predicted_observation = transition_model(torch.Tensor(np.concatenate([obs0, action, observation_indices])).unsqueeze(0).to(device)).detach().cpu()
+                # predicted_score_0 = score_model_classifier(torch.Tensor(np.concatenate([obs0, observation_indices])).unsqueeze(0).to(device)).detach()
+                # predicted_score_1 = score_model_classifier(torch.cat([predicted_observation.clone(), torch.Tensor(observation_indices).unsqueeze(0)], dim=-1).to(device)).detach().cpu()
+                # predicted_observation = policy.encoder.decode(predicted_observation.to(device), reset_info["policy_args"]).cpu().numpy()
+                diffusion_next_observation = policy.encoder.decode(torch.Tensor(pred_states[j]).clone().unsqueeze(0).to(device), reset_info["policy_args"]).cpu().numpy()
+                diffusion_initial_observation = policy.encoder.decode(torch.Tensor(initial_states[j]).clone().unsqueeze(0).to(device), reset_info["policy_args"]).cpu().numpy()
+                # diffusion_next_observation_wo_transition = policy.encoder.decode(torch.Tensor(pred_states_wo_transition[j]).unsqueeze(0).to(device), reset_info["policy_args"]).cpu().numpy()
                 
                 # print("observation:", np.max(np.abs(obs_preprocessor(observation, reset_info["policy_args"]) - predicted_observation)))
                 # print("decoded_observation:", predicted_observation, predicted_observation.shape)
-                print("max error", np.max(np.abs(observation - predicted_observation))/(np.max(np.abs(observation)) - np.min(np.abs(observation))))
-                print("predicted_score_0:", predicted_score_0)
-                print("predicted_score_1:", predicted_score_1)
+                # print("max error", np.max(np.abs(observation - predicted_observation))/(np.max(np.abs(observation)) - np.min(np.abs(observation))))
+                # print("predicted_score_0:", predicted_score_0)
+                # print("predicted_score_1:", predicted_score_1)
 
                 print("rewards:", rewards)
                 print("done:", done)
@@ -343,31 +356,93 @@ def evaluate_episodes(
 
                 if success:
                     env.record_save(path / f"eval_{i}_{j}_success.gif", reset=True)
+                    true_next_observation = env.get_observation()
+                    true_state = env.get_state()
+                    true_obs0 = obs_preprocessor(true_next_observation, reset_info["policy_args"])
                     img = env.render()
                     img_true = np.array(img, dtype=np.uint8)
-                    env.set_observation(predicted_observation)
+                    # env.set_observation(predicted_observation)
+                    # img = env.render()
+                    # img_pred = np.array(img, dtype=np.uint8)
+                    env.set_observation(diffusion_initial_observation)
                     img = env.render()
-                    img_pred = np.array(img, dtype=np.uint8)
+                    img_diffusion_initial = np.array(img, dtype=np.uint8)
+
                     env.set_observation(diffusion_next_observation)
                     img = env.render()
                     img_diffusion = np.array(img, dtype=np.uint8)
-                    env.set_observation(diffusion_next_observation_wo_transition)
-                    img = env.render()
-                    img_diffusion_wo_transition = np.array(img, dtype=np.uint8)
+                    # env.set_observation(diffusion_next_observation_wo_transition)
+                    # img = env.render()
+                    # img_diffusion_wo_transition = np.array(img, dtype=np.uint8)
 
                     Image.fromarray(img_true).save(path / f"eval_{i}_{j}_true.png")
                     # Image.fromarray(img_0).save(path / f"eval_{i}_{j}_0.png")
 
                     # assert False
 
-                    img_both = np.concatenate([img_true, img_pred, img_diffusion, img_diffusion_wo_transition], axis=1)
+                    current_sample = np.concatenate([obs0, action, true_obs0])[None, :]
+
+                    img_both = np.concatenate([img_diffusion_initial, img_diffusion], axis=1)
                     Image.fromarray(img_both).save(path / f"eval_{i}_{j}_pred.png")
+
+                    all_diffusion_samples = diffusion_forward(
+                        diffusion_model_transition,
+                        current_sample
+                    )
+
+                    all_images_gif = []
+
+                    for k in tqdm.tqdm(range(all_diffusion_samples.shape[0])):
+                        
+                        first_obs = policy.encoder.decode(torch.Tensor(all_diffusion_samples[k, :96]).unsqueeze(0).to(device), reset_info["policy_args"]).cpu().numpy()
+                        second_obs = policy.encoder.decode(torch.Tensor(all_diffusion_samples[k, -96:]).unsqueeze(0).to(device), reset_info["policy_args"]).cpu().numpy()
+                        action = all_diffusion_samples[k, 96:-96]
+
+                        first_obs[1] = initial_observation[1]
+                        second_obs[1] = initial_observation[1]
+
+                        env.set_state(init_state)
+                        env.set_observation(first_obs)
+                        img = env.render()
+                        img_first = np.array(img, dtype=np.uint8)
+
+                        env.set_state(init_state)
+                        env.set_observation(second_obs)
+                        img = env.render()
+                        img_second = np.array(img, dtype=np.uint8)
+
+                        img_both = np.concatenate([img_first, img_second], axis=1)
+
+                        all_images_gif.append(Image.fromarray(img_both))
+
+                    for _ in range(50):
+                        all_images_gif.append(Image.fromarray(img_both))
+
+                    all_images_gif[0].save(path / f"eval_{i}_{j}_diffusion.gif", save_all=True, append_images=all_images_gif[1:], duration=100, loop=0)
+                    all_images_gif[-1].save(path / f"eval_{i}_{j}_diffusion_last.png")
+
+                    env.reset(seed=seed)
+
+                    env.record_start()
+                    
+                    for k in tqdm.tqdm([0, 10, 20, 30, 40, 49]):
+                        action = all_diffusion_samples[k, 96:100]
+
+                        # env.set_observation(first_obs)
+                        env.reset(seed=seed)
+
+                        env.step(action)
+
+                    env.record_stop()
+                    env.record_save(path / f"eval_{i}_{j}_all_diffusion.gif", reset=True)
+
                 else:
                     env.record_save(path / f"eval_{i}_{j}_fail.gif", reset=True)
 
                 if success:
                     rewards = []
                     env.set_observation(initial_observation)
+                    break
                 else:
                     rewards = []
                     env.set_observation(initial_observation)

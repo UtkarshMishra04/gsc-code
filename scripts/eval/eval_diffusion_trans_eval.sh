@@ -45,17 +45,17 @@ function eval_diffusion {
 # Setup.
 
 DEBUG=0
-NUM_EPISODES=5
+NUM_EPISODES=20
 
 # Evaluate policies.
 
 SEED=0
 
 policy_envs=(
-    "pick"
+    # "pick"
     # "place"
     # "pull"
-    # "push"
+    "push"
 )
 experiments=(
     "20221024/decoupled_state" # "20220908/official"
@@ -77,8 +77,8 @@ for exp_name in "${experiments[@]}"; do
         for policy_env in "${policy_envs[@]}"; do
             EXP_NAME="${exp_name}/${ckpt}"
             POLICY_CHECKPOINT="models/${exp_name}/${policy_env}/${ckpt}.pt"
-            DIFFUSION_CHECKPOINT="diffusion_models/v8_final/unnormalized_${policy_env}/"
-            ENV_CONFIG="configs/pybullet/envs/official/primitives/${policy_env}_eval.yaml"
+            DIFFUSION_CHECKPOINT="diffusion_models/v7_final_1/unnormalized_${policy_env}/"
+            ENV_CONFIG="configs/pybullet/envs/official/domains/rearrangement_push/task_primitives/task4_push_block.yaml"
             eval_diffusion
         done
     done

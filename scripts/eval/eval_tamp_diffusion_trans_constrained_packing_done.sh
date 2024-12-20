@@ -40,7 +40,7 @@ function eval_tamp_diffusion {
         args="${args} --path ${PLANNER_OUTPUT_PATH}"
         args="${args} --verbose 0"
     fi
-    CMD="python scripts/eval/eval_tamp_diffusion_trans_hook_reach_done.py ${args}"
+    CMD="python scripts/eval/eval_tamp_diffusion_trans_constrained_packing_done.py ${args}"
     run_cmd
 }
 
@@ -106,10 +106,10 @@ ENVS=(
     # "hook_reach/tamp1"
     # "hook_reach/task0"
     # "hook_reach/task1"
-    "hook_reach/task2"
+    # "hook_reach/task2"
     # "hook_reach/task3"
     # "constrained_packing/tamp0"
-    # "constrained_packing/task0"
+    "constrained_packing/task0"
     # "constrained_packing/task1"
     # "constrained_packing/task2"
     # "rearrangement_push/task0"

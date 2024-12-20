@@ -425,7 +425,7 @@ def evaluate_episodes(
             env.reset(seed=seed)
             env.set_observation(initial_observation)
 
-            # env.record_start()
+            env.record_start()
 
             rewards = []
 
@@ -449,37 +449,37 @@ def evaluate_episodes(
 
             success = np.prod(rewards) > 0
 
-            # env.record_stop()
+            env.record_stop()
 
-            # if success:
-            #     env.record_save(path / f"eval_{ep}_{i}_{j}_success.gif", reset=True)
+            if success:
+                env.record_save(path / f"eval_{ep}_{i}_{j}_success.gif", reset=True)
 
-            #     imgs = []
+                imgs = []
 
-            #     for state in pred_states:
-            #         curr_state = state[j].reshape(8, 12)
-            #         curr_state = policy.encoder.unnormalize(torch.Tensor(curr_state).unsqueeze(0).to(device)).detach().cpu().numpy()[0]
-            #         env.set_observation(curr_state)
-            #         imgs.append(env.render())
+                for state in pred_states:
+                    curr_state = state[j].reshape(8, 12)
+                    curr_state = policy.encoder.unnormalize(torch.Tensor(curr_state).unsqueeze(0).to(device)).detach().cpu().numpy()[0]
+                    env.set_observation(curr_state)
+                    imgs.append(env.render())
 
-            #     imgs = np.concatenate(imgs, axis=1)
+                imgs = np.concatenate(imgs, axis=1)
 
-            #     Image.fromarray(imgs).save(path / f"eval_{ep}_{i}_{j}_success.png")              
+                Image.fromarray(imgs).save(path / f"eval_{ep}_{i}_{j}_success.png")              
 
-            # else:
-            #     env.record_save(path / f"eval_{ep}_{i}_{j}_fail.gif", reset=True)
+            else:
+                env.record_save(path / f"eval_{ep}_{i}_{j}_fail.gif", reset=True)
 
-            #     imgs = []
+                imgs = []
 
-            #     for state in pred_states:
-            #         curr_state = state[j].reshape(8, 12)
-            #         curr_state = policy.encoder.unnormalize(torch.Tensor(curr_state).unsqueeze(0).to(device)).detach().cpu().numpy()[0]
-            #         env.set_observation(curr_state)
-            #         imgs.append(env.render())
+                for state in pred_states:
+                    curr_state = state[j].reshape(8, 12)
+                    curr_state = policy.encoder.unnormalize(torch.Tensor(curr_state).unsqueeze(0).to(device)).detach().cpu().numpy()[0]
+                    env.set_observation(curr_state)
+                    imgs.append(env.render())
 
-            #     imgs = np.concatenate(imgs, axis=1)
+                imgs = np.concatenate(imgs, axis=1)
 
-            #     Image.fromarray(imgs).save(path / f"eval_{ep}_{i}_{j}_fail.png")   
+                Image.fromarray(imgs).save(path / f"eval_{ep}_{i}_{j}_fail.png")   
 
             if success:
                 env.set_observation(initial_observation)

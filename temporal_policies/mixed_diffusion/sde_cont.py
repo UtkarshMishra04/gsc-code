@@ -36,7 +36,7 @@ class VariancePreservingSDE(torch.nn.Module):
     def alpha(self, t):
         if t.squeeze().ndim == 0:
             if t.squeeze() == 1:
-                t = t*257/256
+                t = t*(self.N+1)/self.N
 
         return self.cosine_schedule(t)
 

@@ -46,18 +46,18 @@ class Encoder(torch.nn.Module, abc.ABC):
         """
         pass
 
-    @abc.abstractmethod
-    def backward(
-        self,
-        latent: torch.Tensor,
-        policy_args: Union[np.ndarray, Optional[Any]],
-        **kwargs
-    ) -> torch.Tensor:
+    # @abc.abstractmethod
+    # def backward(
+    #     self,
+    #     latent: torch.Tensor,
+    #     policy_args: Union[np.ndarray, Optional[Any]],
+    #     **kwargs
+    # ) -> torch.Tensor:
 
-        """
-        Decodes the latent state into an observation.
-        """
-        pass
+    #     """
+    #     Decodes the latent state into an observation.
+    #     """
+    #     pass
 
     def predict(
         self,

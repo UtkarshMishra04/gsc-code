@@ -7,13 +7,13 @@ from typing import Any, Dict, Generator, List, Optional, Sequence, Tuple, Union,
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import time
 import numpy as np
 import symbolic
 import tqdm
 import json
 from PIL import Image
-
+import pickle
 from temporal_policies import dynamics, agents, envs, planners, agents
 from temporal_policies.envs.pybullet.table import primitives as table_primitives
 from temporal_policies.utils import recording, timing, random, tensors
@@ -21,7 +21,6 @@ from temporal_policies.utils import recording, timing, random, tensors
 from temporal_policies.diff_models.unet_transformer import ScoreNet, ScoreNetState
 from temporal_policies.diff_models.classifier_transformer import ScoreModelMLP, TransitionModel
 from temporal_policies.mixed_diffusion.cond_diffusion1D import Diffusion
-
 
 @tensors.numpy_wrap
 def query_policy_actor(
@@ -85,6 +84,113 @@ def transform_backward(
 
     return observation.reshape(-1, 8, 12)[:, indices].reshape(-1, curr_size)
 
+def forward_diffusion(
+    diffusion_model: Diffusion,
+    observation: torch.Tensor,
+    observation_indices: np.ndarray,
+    reset_observation_indices: np.ndarray,
+    device: torch.device = "auto",
+    num_samples: int = 5,
+    num_objects: int = 7,
+    end_index: int = 36,
+    num_steps: int = 256,
+    state_dim: int = 96,
+    action_dim: int = 4,
+):
+
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device)
+
+    diffusion_model.to(device)
+
+    all_samples = []
+
+    if observation is not None:
+        obs0 = np.array(observation)*2
+        x0 = torch.Tensor(obs0).to(device)
+    else:
+        x0 = None
+
+    reverse_observation_indices = np.zeros_like(observation_indices)
+
+    for j in range(len(observation_indices)):
+        reverse_observation_indices[observation_indices[j]] = j
+
+    reverse_reset_observation_indices = np.zeros_like(reset_observation_indices)
+
+    for j in range(len(reset_observation_indices)):
+        reverse_reset_observation_indices[reset_observation_indices[j]] = j
+
+    obs_ind = torch.Tensor(observation_indices).to(device).unsqueeze(0).repeat(num_samples, 1)
+    
+    if x0 is not None:
+        mod_x0 = transform_backward(x0, reverse_reset_observation_indices)
+    else:
+        mod_x0 = None
+    # mod_x0 = transform_forward(x0, observation_indices)
+
+    # all_samples.append(observation.clone().unsqueeze(0).cpu().numpy())
+
+    sample_dim = state_dim + action_dim + state_dim
+
+    xt = torch.zeros(num_samples, sample_dim).to(device)
+
+    sde, ones = diffusion_model.configure_sdes(num_steps=num_steps, x_T=xt, num_samples=num_samples)
+
+    all_samples.append(xt.clone().unsqueeze(0).cpu().numpy())
+
+    for t in range(num_steps):
+
+        sample = xt.clone()
+        sample[:, :state_dim] = transform_forward(sample[:, :state_dim], observation_indices)
+        sample[:, -state_dim:] = transform_forward(sample[:, -state_dim:], observation_indices)
+
+        epsilon, alpha_t, alpha_tm1 = sde.sample_epsilon(t * ones, sample, obs_ind)
+        
+        pred_x0 = (sample - torch.sqrt(1 - alpha_t)*epsilon) / torch.sqrt(alpha_t)
+        
+        pred_x0[:, -state_dim+36:] = pred_x0[:, 36:state_dim]
+
+        epsilon = (sample - torch.sqrt(alpha_t)*pred_x0) / torch.sqrt(1 - alpha_t)
+
+        epsilon[:, :state_dim] = transform_backward(epsilon[:, :state_dim], reverse_observation_indices)
+        epsilon[:, -state_dim:] = transform_backward(epsilon[:, -state_dim:], reverse_observation_indices)
+
+        pred_x0 = (xt - torch.sqrt(1 - alpha_t)*epsilon) / torch.sqrt(alpha_t)
+
+        if mod_x0 is not None:
+            pred_x0[:, 12:end_index] = mod_x0[12:end_index]
+            pred_x0[:, 12*num_objects:state_dim] = mod_x0[12*num_objects:]
+            # pred_x0[:, :state_dim] = mod_x0[:state_dim]
+            pred_x0[:, -state_dim+12:-state_dim+end_index] = mod_x0[12:end_index]
+            pred_x0[:, -state_dim+12*num_objects:] = mod_x0[12*num_objects:]
+
+        with torch.no_grad():
+
+            pred_x0 = torch.clip(pred_x0, -1, 1)
+            new_epsilon = torch.randn_like(epsilon)
+            xt = torch.sqrt(alpha_tm1)*pred_x0 + torch.sqrt(1 - alpha_tm1)*new_epsilon
+
+        all_samples.append(xt.clone().unsqueeze(0).cpu().numpy())
+    
+    all_samples = np.concatenate(all_samples, axis=0)
+
+    all_mod_samples = []
+
+    for i in range(num_samples):
+        all_samples1 = all_samples[:, i, :]
+
+        # all_samples1[:, :state_dim] = transform_backward(all_samples1[:, :state_dim], reverse_observation_indices)*0.5
+        # all_samples1[:, -state_dim:] = transform_backward(all_samples1[:, -state_dim:], reverse_observation_indices)*0.5
+
+        all_samples1[:, :state_dim] = all_samples1[:, :state_dim]*0.5
+        all_samples1[:, -state_dim:] = all_samples1[:, -state_dim:]*0.5
+
+        all_mod_samples.append(all_samples1)
+
+    return all_mod_samples
+
 def get_action_from_multi_diffusion(
     policies: Sequence[agents.RLAgent],
     diffusion_models: Sequence[Diffusion],
@@ -98,9 +204,11 @@ def get_action_from_multi_diffusion(
     end_index: int = 24,
     state_dim: int = 96,
     action_dim: int = 4,
-    gamma: Sequence[float] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    gamma: Sequence[float] = [1.0, 1.0, 0.5, 0.5, 0.5, 0.5, 1.0, 0.5, 1.0, 0.5, 1.0],
     device: torch.device = "auto"
 ) -> np.ndarray:
+
+    start_time = time.time()
 
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -130,6 +238,9 @@ def get_action_from_multi_diffusion(
     all_observation_indices = []
     all_reverse_observation_indices = []
 
+    print("action_skeleton:", len(action_skeleton))
+    print("policies:", len(policies))
+
     for i in range(len(policies)):
         observation_indices = np.array(action_skeleton[i].get_policy_args()["observation_indices"])
         reverse_observation_indices = np.zeros_like(observation_indices)
@@ -147,6 +258,9 @@ def get_action_from_multi_diffusion(
 
     all_sdes, all_ones, all_obs_ind, all_reverse_obs_ind = [], [], [], []
 
+    end1 = time.time()
+    # print("Var init time:", end1 - start_time)
+
     for i in range(len(policies)):
         obs_ind = torch.Tensor(all_observation_indices[i]).to(device).unsqueeze(0).repeat(num_samples, 1)
         reverse_obs_ind = torch.Tensor(all_reverse_observation_indices[i]).to(device).unsqueeze(0).repeat(num_samples, 1)
@@ -156,13 +270,20 @@ def get_action_from_multi_diffusion(
         all_obs_ind.append(obs_ind)
         all_reverse_obs_ind.append(reverse_obs_ind)
 
+    end2 = time.time()
+    # print("SDE init time:", end2 - end1)
+
     for t in tqdm.tqdm(range(num_steps, 0, -1)):
 
         total_epsilon = torch.zeros_like(xt)
 
         all_epsilons = []
 
+        end3 = time.time()
+        # print("Epsilon init time:", end3 - end2)
+
         for i, sde, ones, indices_dm, indices_sdm, obs_ind, reverse_obs_ind, transition_model, observation_indices, reverse_observation_indices in zip(range(len(policies)), all_sdes, all_ones, indices_dms, indices_sdms, all_obs_ind, all_reverse_obs_ind, transition_models, all_observation_indices, all_reverse_observation_indices):
+            end4 = time.time()
 
             with torch.no_grad():
                 sample = xt[:, indices_dm[0]:indices_dm[1]].clone()
@@ -173,28 +294,7 @@ def get_action_from_multi_diffusion(
                 
                 pred_x0 = (sample - torch.sqrt(1 - alpha_t)*epsilon) / torch.sqrt(alpha_t)
                 
-                # if i == 0:
-                #     pred_x0[:, :state_dim] = x0
-
                 pred_x0[:, -state_dim+36:] = pred_x0[:, 36:state_dim]
-
-            # if i == 0:
-            #     current_state = pred_x0[:, :state_dim].detach()
-            #     current_action = pred_x0[:, state_dim:state_dim+action_dim].detach()
-            #     current_action = current_action.clone()
-            #     current_action.requires_grad = True
-            #     next_state = transition_model(torch.cat([current_state, current_action, obs_ind], dim=1))
-            #     target_next_state = pred_x0[:, state_dim+action_dim:]
-            #     loss = F.mse_loss(next_state, target_next_state)
-            #     loss.backward()
-            #     current_action = current_action.detach() - 0.5*current_action.grad.detach()
-            #     pred_x0[:, state_dim:state_dim+action_dim] = current_action
-            
-            with torch.no_grad():
-                if use_transition_model:
-                    pred_x0[:, state_dim+action_dim:] = transition_model(torch.cat([pred_x0[:, :state_dim+action_dim], obs_ind], dim=1))
-
-                pred_x0 = torch.clip(pred_x0, -1, 1)
 
                 epsilon = (sample - torch.sqrt(alpha_t)*pred_x0) / torch.sqrt(1 - alpha_t)
 
@@ -207,11 +307,14 @@ def get_action_from_multi_diffusion(
 
                 if i > 0:
                     total_epsilon[:, indices_sdm[0]:indices_sdm[1]] = gamma[i]*all_epsilons[i-1][:, -state_dim:] + (1-gamma[i])*all_epsilons[i][:, :state_dim]
+                
+            end5 = time.time()
+            # print("Epsilon one loop time:", end5 - end4)
+
+        end6 = time.time()
+        # print("Epsilon loop time:", end6 - end3)
 
         pred_x0 = (xt - torch.sqrt(1 - alpha_t)*total_epsilon) / torch.sqrt(alpha_t)
-
-        # pred_x0[:, :state_dim] = transform_backward(pred_x0[:, :state_dim], reverse_observation_indices)
-        # pred_x0[:, state_dim+action_dim:] = transform_backward(pred_x0[:, state_dim+action_dim:], reverse_observation_indices)
 
         pred_x0[:, :state_dim] = mod_x0[:state_dim]
 
@@ -226,7 +329,6 @@ def get_action_from_multi_diffusion(
             action1 = pred_x0[:, (state_dim+action_dim)+state_dim:2*(state_dim+action_dim)]
             action2 = pred_x0[:, 3*(state_dim+action_dim)+state_dim:4*(state_dim+action_dim)]
             action3 = pred_x0[:, 5*(state_dim+action_dim)+state_dim:6*(state_dim+action_dim)]
-            # action4 = pred_x0[:, 7*(state_dim+action_dim)+state_dim:8*(state_dim+action_dim)]
 
             # maximize distance between actions
 
@@ -280,33 +382,22 @@ def get_action_from_multi_diffusion(
 
                 action3[:, :2] = action3[:, :2] + action3_grad[:, :2]
 
-            # for _ in range(5):
-
-            #     action4 = action4.detach()
-
-            #     action4.requires_grad = True
-
-            #     distance = torch.norm(action1[:, :2] - action4[:, :2], dim=1) + torch.norm(action2[:, :2] - action4[:, :2], dim=1) + torch.norm(action3[:, :2] - action4[:, :2], dim=1)
-
-            #     distance = distance.mean()
-
-            #     distance.backward()
-
-            #     action4_grad = action4.grad.clone()
-
-            #     action4 = action4.detach()
-
-            #     action4[:, :2] = action4[:, :2] + action4_grad[:, :2]
-
             pred_x0[:, 3*(state_dim+action_dim)+state_dim:4*(state_dim+action_dim)] = action2
             pred_x0[:, 5*(state_dim+action_dim)+state_dim:6*(state_dim+action_dim)] = action3
-            # pred_x0[:, 7*(state_dim+action_dim)+state_dim:8*(state_dim+action_dim)] = action4
-
+            
         with torch.no_grad():
+
+            pred_x0 = torch.clip(pred_x0, -1, 1)
 
             new_epsilon = torch.randn_like(total_epsilon)
 
             xt = torch.sqrt(alpha_tm1)*pred_x0 + torch.sqrt(1 - alpha_tm1)*new_epsilon
+
+        end7 = time.time()
+        # print("Xt loop time:", end7 - end3)
+
+    end8 = time.time()
+    # print("Total loop time:", end8 - end2)
 
     xt = xt.detach().cpu().numpy()
 
@@ -344,33 +435,23 @@ def get_action_from_multi_diffusion(
     
     all_states.append(xt[:, -state_dim:]*0.5)
 
+    end9 = time.time()
+
     return all_actions, all_states
 
-def evaluate_episodes(
-    env: envs.Env,
-    skills: Sequence[str] = [],
-    policies: Optional[Sequence[Optional[agents.RLAgent]]] = None,
-    diffusion_models: Optional[Sequence[Optional[Diffusion]]] = None,
-    diffusion_state_models: Optional[Sequence[Optional[Diffusion]]] = None,
-    transition_models: Optional[Sequence[Optional[TransitionModel]]] = None,
-    classifier_models: Optional[Sequence[Optional[ScoreModelMLP]]] = None,
-    observation_preprocessors: Optional[Sequence[Optional[Callable]]] = None,
-    target_skill_sequence: Sequence[int] = [],
-    target_length: int = 10,
-    num_episodes: int = 5,
-    path: Optional[Union[str, pathlib.Path]] = None,
-    verbose: bool = False,
-    seed: Optional[int] = None,
-    device: str = "auto",
-) -> None:
-    """Evaluates policy for the given number of episodes."""
-    num_successes = 0
-    pbar = tqdm.tqdm(
-        range(num_episodes),
-        desc=f"Evaluate {env.name}",
-        dynamic_ncols=True,
-    )
-
+def test_dict(
+    env,
+    skills,
+    policies,
+    diffusion_models,
+    transition_models,
+    classifier_models,
+    info_dict,
+    observation_preprocessors,
+    target_skill_sequence,
+    device
+):
+    
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -380,206 +461,54 @@ def evaluate_episodes(
 
     policy = policies[current_skill]
     diffusion_model_transition = diffusion_models[current_skill]
-    diffusion_model_state = diffusion_state_models[current_skill]
     transition_model = transition_models[current_skill]
     score_model_classifier = classifier_models[current_skill]
     obs_preprocessor = observation_preprocessors[current_skill]
 
     diffusion_model_transition.to(device)
-    diffusion_model_state.to(device)
     transition_model.to(device)
     score_model_classifier.to(device)
 
     all_results = []
-
-    if not path.exists():
-        path.mkdir(parents=True)
-
-    # remove all gif files from path
-    for f in path.iterdir():
-        if f.suffix == ".gif" or f.suffix == ".png":
-            f.unlink()
-
     all_rewards = None
 
-    index = 0
-
-    skip_index = 10
-
-    for ep in pbar:
-
-        # Evaluate episode.
-        observation, reset_info = env.reset() #seed=seed)
-
-        index += 1
-        
-        if index < skip_index:
-            continue
-
-        print("reset_info:", reset_info, "env.task", env.task)
-        seed = reset_info["seed"]
-        initial_observation = observation
-        observation_indices = reset_info["policy_args"]["observation_indices"]
-        print("primitive:", env.get_primitive(), env.action_skeleton[0].get_policy_args()["observation_indices"])
-        print("reset_info:", reset_info)
-
-        rewards = []
-        done = False
-
-        obs0 = obs_preprocessor(observation, reset_info["policy_args"])
-        policy_action = query_policy_actor(policy, observation, reset_info["policy_args"])
-
-        target_skill_sequence = target_skill_sequence[:target_length]
-
-        # actions, pred_states = get_action_from_diffusion(
-        #     policy,
-        #     diffusion_model_transition,
-        #     transition_model,
-        #     score_model_classifier,
-        #     obs0,
-        #     observation_indices=observation_indices,
-        #     use_transition_model=False,
-        #     device=device
-        # )
-
-        print("Considering skills:", skills[target_skill_sequence[0]], skills[target_skill_sequence[1]])
-
-        # actions, pred_states = get_action_from_two_diffusion(
-        #     policies[skills[target_skill_sequence[0]]],
-        #     policies[skills[target_skill_sequence[1]]],
-        #     diffusion_models[skills[target_skill_sequence[0]]],
-        #     diffusion_models[skills[target_skill_sequence[1]]],
-        #     transition_models[skills[target_skill_sequence[0]]],
-        #     transition_models[skills[target_skill_sequence[1]]],
-        #     classifier_models[skills[target_skill_sequence[0]]],
-        #     classifier_models[skills[target_skill_sequence[1]]],
-        #     obs0,
-        #     observation_indices1=np.array(env.action_skeleton[0].get_policy_args()["observation_indices"]),
-        #     observation_indices2=np.array(env.action_skeleton[1].get_policy_args()["observation_indices"]),
-        #     use_transition_model=False,
-        #     device=device
-        # )
-
-        actions, pred_states = get_action_from_multi_diffusion(
-            policies=[policies[skills[i]] for i in target_skill_sequence],
-            diffusion_models=[diffusion_models[skills[i]] for i in target_skill_sequence],
-            transition_models=[transition_models[skills[i]] for i in target_skill_sequence],
-            classifiers=[classifier_models[skills[i]] for i in target_skill_sequence],
-            obs0=obs0,
-            action_skeleton=env.action_skeleton,
-            use_transition_model=False,
-            num_objects=7,
-            end_index=36,
-            device=device
-        )
-
-        if verbose:
-            print("observation:", observation_str(env, observation))
-            print("observation tensor:", observation)
-            # print("action:", action_str(env, action))
-
-        print("actions:", actions)
-        print("policy_action:", policy_action)
-
-        for j in range(actions[0].shape[0]):
-
-            all_true_images = []
-
-            env.reset(seed=seed)
-            env.set_observation(initial_observation)
-
-            env.record_start()
-
-            all_true_images.append(env.render())
-
-            rewards = []
-
-            print("#########################################################################################")
-
-            for i, action in enumerate(actions):
-
-                env.set_primitive(env.action_skeleton[i])
-
-                try:
-                    # action = policy_action
-                    observation, reward, terminated, truncated, step_info = env.step(action[j])
-                    all_true_images.append(env.render())
-                except Exception as e:
-                    continue
-
-                if verbose:
-                    print("step_info:", step_info)
-                    
-                print(f"Action for: {skills[target_skill_sequence[i]]}, reward: {reward}, terminated: {terminated}, truncated: {truncated}")
-
-                rewards.append(reward)
-                done = terminated or truncated
-
-            success = np.prod(rewards) > 0
-
-            env.record_stop()
-
-            if success:
-                env.record_save(path / f"eval_{ep}_{i}_{j}_success.gif", reset=True)
-
-                imgs = []
-
-                for state in pred_states:
-                    curr_state = state[j].reshape(8, 12)
-                    curr_state = policy.encoder.unnormalize(torch.Tensor(curr_state).unsqueeze(0).to(device)).detach().cpu().numpy()[0]
-                    env.set_observation(curr_state)
-                    imgs.append(env.render())
-
-                imgs = np.concatenate(imgs, axis=1)
-
-                Image.fromarray(imgs).save(path / f"eval_{ep}_{i}_{j}_success.png")         
-
-                all_true_images = np.concatenate(all_true_images, axis=1)
-
-                Image.fromarray(all_true_images).save(path / f"eval_{ep}_{i}_{j}_true.png")     
-
-            else:
-                env.record_save(path / f"eval_{ep}_{i}_{j}_fail.gif", reset=True)
-
-                imgs = []
-
-                for state in pred_states:
-                    curr_state = state[j].reshape(8, 12)
-                    curr_state = policy.encoder.unnormalize(torch.Tensor(curr_state).unsqueeze(0).to(device)).detach().cpu().numpy()[0]
-                    env.set_observation(curr_state)
-                    imgs.append(env.render())
-
-                imgs = np.concatenate(imgs, axis=1)
-
-                Image.fromarray(imgs).save(path / f"eval_{ep}_{i}_{j}_fail.png")   
-
-            if success:
-                env.set_observation(initial_observation)
-                break
-            else:
-                env.set_observation(initial_observation)
-
-            print("#########################################################################################")
-
-        if all_rewards is None:
-            all_rewards = np.array(rewards)
-        else:
-            all_rewards += np.array(rewards)
-
-        num_successes += success
-        pbar.set_postfix(
-            {"rewards": all_rewards, "successes": f"{num_successes} / {num_episodes}"}
-        )
-
-    # save results as json
-    # with open(path / f"results_{seed}.json", "w") as f:
-    #     json.dump(
-    #         {
-    #             "num_episodes": num_episodes,
-    #             "num_successes": num_successes,
-    #         }, f)
+    observation = info_dict["initial_observation"]
+    reset_info = info_dict["reset_info"]
+    target_skill_sequence = info_dict["target_skill_sequence"]
+    obs0 = info_dict["obs0"]
 
 
+    print("reset_info:", reset_info, "env.task", env.task)
+    seed = reset_info["seed"]
+    initial_observation = observation
+    observation_indices = reset_info["policy_args"]["observation_indices"]
+    print("primitive:", env.get_primitive(), env.action_skeleton[0].get_policy_args()["observation_indices"])
+    print("reset_info:", reset_info)
+
+    obs0 = obs_preprocessor(observation, reset_info["policy_args"])
+    policy_action = query_policy_actor(policy, observation, reset_info["policy_args"])
+
+    print("Considering skills:", skills[target_skill_sequence[0]], skills[target_skill_sequence[1]])
+
+    actions, pred_states = get_action_from_multi_diffusion(
+        policies=[policies[skills[i]] for i in target_skill_sequence],
+        diffusion_models=[diffusion_models[skills[i]] for i in target_skill_sequence],
+        transition_models=[transition_models[skills[i]] for i in target_skill_sequence],
+        classifiers=[classifier_models[skills[i]] for i in target_skill_sequence],
+        obs0=obs0.copy(),
+        action_skeleton=env.action_skeleton,
+        use_transition_model=False,
+        num_objects=info_dict["num_objects"],
+        end_index=info_dict["end_index"],
+        device=device
+    )
+
+    print("observation:", observation_str(env, observation))
+    print("observation tensor:", observation.shape)
+    # print("action:", action_str(env, action))
+
+    print("actions:", len(actions), actions[0].shape)
+    print("policy_action:", policy_action.shape)
 
 def evaluate_diffusion(
     env_config: Union[str, pathlib.Path, Dict[str, Any]],
@@ -622,7 +551,7 @@ def evaluate_diffusion(
         env = None
         assert False
 
-    all_skills = ["pick", "place", "pull", "push"]
+    all_skills = ["pick", "place", "pull", "push", "pick_hook"]
     all_policies = {}
     all_diffusion_models = {}
     all_diffusion_state_models = {}
@@ -689,27 +618,187 @@ def evaluate_diffusion(
         all_classifier_models[all_skills[i]] = score_model_classifier
         all_observation_preprocessors[all_skills[i]] = observation_preprocessor
 
-    target_skill_sequence = [0, 1, 0, 1, 0, 1] #, 0, 1]
-    target_length = len(target_skill_sequence)
-    num_episodes = num_eval
+    # target_skill_sequence = [0, 1, 0, 1, 4, 3] #1, 0, 1, 0, 3]
+    # target_skill_sequence = [4, 2, 1, 0, 1, 4, 3]
+    target_skill_sequence = [4, 0, 1, 2, 4, 3]
 
-    evaluate_episodes(
-        env=env,
-        skills=all_skills,
-        policies=all_policies,
-        diffusion_models=all_diffusion_models,
-        diffusion_state_models=all_diffusion_state_models,
-        transition_models=all_transition_models,
-        classifier_models=all_classifier_models,
-        observation_preprocessors=all_observation_preprocessors,
-        target_skill_sequence=target_skill_sequence,
-        target_length=target_length,
-        num_episodes=num_episodes,
-        path=pathlib.Path(path),
-        verbose=verbose,
-        seed=seed,
-    )
+    pkl_dicts = "/home/umishra31/Fall2024/GSC_task/gsc_suite/temporal_policies/plots/dummy_experiment/*.pkl"
+    import glob
+    pkl_files = sorted(glob.glob(pkl_dicts))
+    
+    for pkl_file in pkl_files:
+        with open(pkl_file, "rb") as f:
+            info_dict = pickle.load(f)
+        actions, pred_states = get_action_from_multi_diffusion(
+            policies=[all_policies[all_skills[i]] for i in target_skill_sequence],
+            diffusion_models=[all_diffusion_models[all_skills[i]] for i in target_skill_sequence],
+            transition_models=[all_transition_models[all_skills[i]] for i in target_skill_sequence],
+            classifiers=[all_classifier_models[all_skills[i]] for i in target_skill_sequence],
+            obs0=info_dict["obs0"].copy(),
+            action_skeleton=env.action_skeleton,
+            use_transition_model=False,
+            num_objects=info_dict["num_objects"],
+            end_index=info_dict["end_index"],
+            device=device
+        )
 
+        # calculate sds loss
+        all_sds_losses = []
+        for i in range(len(target_skill_sequence)):
+            target_skill = target_skill_sequence[i]
+            observation = np.concatenate([pred_states[i], actions[i], pred_states[i+1]], axis=1)
+            
+            sds_loss = get_sds_loss(
+                diffusion_model=all_diffusion_models[all_skills[target_skill]],
+                observation=torch.Tensor(observation),
+                observation_indices=env.action_skeleton[target_skill].get_policy_args()["observation_indices"],
+                device=device
+            )
+
+            print(f"Skill {all_skills[target_skill]}: {sds_loss}")
+
+            all_sds_losses.append(sds_loss)
+
+        # geometric mean of sds losses
+        sds_loss = np.prod(all_sds_losses)**(1/len(all_sds_losses))
+        print(f"Total SDS Loss: {sds_loss} for {target_skill_sequence}")
+
+        assert False
+
+        all_predicted_initial_states = []
+        all_predicted_final_states = []
+        for sk in range(5):
+            id1 = sk
+            id2 = sk if sk < 4 else 0
+            all_skill_states = forward_diffusion(
+                diffusion_model=all_diffusion_models[all_skills[id1]],
+                observation=info_dict["obs0"] if id1 == target_skill_sequence[0] else None,
+                observation_indices=env.action_skeleton[id2].get_policy_args()["observation_indices"],
+                reset_observation_indices=env.action_skeleton[target_skill_sequence[0]].get_policy_args()["observation_indices"],
+                num_samples=100,
+                num_objects=info_dict["num_objects"],
+                end_index=info_dict["end_index"],
+                num_steps=256,
+                device=device
+            )
+
+            all_skill_states = np.array(all_skill_states)
+            all_predicted_initial_states.append(all_skill_states[:, -1, :96])
+            all_predicted_final_states.append(all_skill_states[:, -1, -96:])    
+
+        all_distances = []
+
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(1, len(target_skill_sequence)-1, figsize=(5*(len(target_skill_sequence)-1), 5))
+
+        # plt.hist(diff1, bins=100, alpha=0.5, label='Distribution 1')
+        # plt.hist(diff2, bins=100, alpha=0.5, label='Distribution 2')
+        # plt.legend()
+        # plt.savefig('distance_histogram1.png')
+
+        skeleton_score = 0
+
+        for j in range(len(target_skill_sequence)-1):
+            skill1 = target_skill_sequence[j]
+            skill2 = target_skill_sequence[j+1]
+
+            min_dist1, min_dist2, score = generate_distance_matrix(
+                [all_predicted_final_states[skill1], all_predicted_initial_states[skill2]],
+                lambda x: transform_forward(x, env.action_skeleton[skill2].get_policy_args()["observation_indices"]),
+            )
+            
+            skeleton_score += score
+
+            ax[j].hist(min_dist1, bins=100, alpha=0.5, label='Distribution 1')
+            ax[j].hist(min_dist2, bins=100, alpha=0.5, label='Distribution 2')
+            ax[j].legend()
+            ax[j].set_title(f"Skill {all_skills[skill1]} to Skill {all_skills[skill2]}")
+
+        skeleton_score /= len(target_skill_sequence)-1
+
+        named_skills = [all_skills[i] for i in target_skill_sequence]
+        # position the title at the bottom center
+        plt.suptitle(
+            f"Total Score: {skeleton_score} for {named_skills} infeasible conditional",   
+        )
+        plt.tight_layout()
+        plt.savefig(f'distance_histogram_{target_skill_sequence}_infeasible_conditional.png')
+
+        assert False
+            
+@torch.no_grad()
+def generate_distance_matrix(all_samples, encoder=None):
+
+    dist1 = all_samples[0]
+    dist2 = all_samples[1]
+
+    if encoder is not None:
+        dist1 = encoder(dist1)
+        dist2 = encoder(dist2)
+
+    # calculate chamfer distance between dist1 and dist2
+    # dist1 = dist1.unsqueeze(1).cpu().numpy()
+    # dist2 = dist2.unsqueeze(0).cpu().numpy()
+    dist1 = dist1[:, None, :36]
+    dist2 = dist2[None, :, :36]
+    diff = dist1 - dist2
+    diff = np.linalg.norm(diff[:, :, 12:18], axis=-1) + np.linalg.norm(diff[:, :, 24:30], axis=-1)
+
+    print("diff:", diff.shape)
+
+    min_dist1 = np.min(diff, axis=1)
+    min_dist2 = np.min(diff, axis=0)
+
+    return min_dist1, min_dist2, np.mean(min_dist1) + np.mean(min_dist2)
+
+@torch.no_grad()
+def get_sds_loss(
+    diffusion_model: Diffusion,
+    observation: torch.Tensor,
+    observation_indices: np.ndarray,
+    device: torch.device = "auto",
+    num_steps: int = 256,
+    state_dim: int = 96,
+):
+
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device)
+
+    diffusion_model.to(device)
+
+    num_samples = observation.shape[0]
+    obs_ind = torch.Tensor(observation_indices).to(device).unsqueeze(0).repeat(num_samples, 1)
+
+    # all_samples.append(observation.clone().unsqueeze(0).cpu().numpy())
+
+    observation[:, :state_dim] = transform_forward(observation[:, :state_dim], observation_indices)
+    observation[:, -state_dim:] = transform_forward(observation[:, -state_dim:], observation_indices)
+
+    xt = torch.zeros_like(observation).to(device)
+
+    sde, ones = diffusion_model.configure_sdes(num_steps=num_steps, x_T=xt, num_samples=num_samples)
+
+    all_grads = []
+    for t in range(num_steps):
+
+        alpha_t = sde.base_sde.alpha(t * ones/sde.N).to(device)
+        noise = torch.randn_like(observation)
+        observation = observation.to(device)
+        noise = noise.to(device)
+
+        sample = torch.sqrt(alpha_t) * observation + torch.sqrt(1 - alpha_t) * noise
+        epsilon, alpha_t, alpha_tm1 = sde.sample_epsilon(t * ones, sample, obs_ind)
+
+        error_state1 = (epsilon - noise)[:, :state_dim][:, 12:36]
+        error_state2 = (epsilon - noise)[:, -state_dim:][:, 12:36]
+
+        w = 1 - torch.sqrt(alpha_t)
+        grad = w * (torch.linalg.norm(error_state1, dim=1) + torch.linalg.norm(error_state2, dim=1))
+        all_grads.append(grad.mean().item())
+
+    return np.mean(all_grads)
 
 def main(args: argparse.Namespace) -> None:
     evaluate_diffusion(**vars(args))
@@ -743,5 +832,32 @@ if __name__ == "__main__":
         "--timeout", type=float, default=10.0, help="Task planning timeout"
     )
     args = parser.parse_args()
+
+    args.env_config = pathlib.Path("/home/umishra31/Fall2024/GSC_task/gsc_suite/temporal_policies/configs/pybullet/envs/official/domains/rearrangement_push/task1.yaml")
+    args.policy_checkpoints = [
+       "/home/umishra31/Fall2024/GSC_task/gsc_suite/temporal_policies/models/20221024/decoupled_state/pick/ckpt_model_200000.pt",
+       "/home/umishra31/Fall2024/GSC_task/gsc_suite/temporal_policies/models/20221024/decoupled_state/place/ckpt_model_200000.pt",
+       "/home/umishra31/Fall2024/GSC_task/gsc_suite/temporal_policies/models/20221024/decoupled_state/pull/ckpt_model_200000.pt",
+       "/home/umishra31/Fall2024/GSC_task/gsc_suite/temporal_policies/models/20221024/decoupled_state/push/ckpt_model_200000.pt",
+       "/home/umishra31/Fall2024/GSC_task/gsc_suite/temporal_policies/models/20221024/decoupled_state/pick/ckpt_model_200000.pt",
+    ]
+    args.diffusion_checkpoints = [
+        "/home/umishra31/Fall2024/GSC_task/gsc_suite/temporal_policies/diffusion_models/v7_final_1/unnormalized_pick/",
+        "/home/umishra31/Fall2024/GSC_task/gsc_suite/temporal_policies/diffusion_models/v7_final_1/unnormalized_place/",
+        "/home/umishra31/Fall2024/GSC_task/gsc_suite/temporal_policies/diffusion_models/v7_final_1/unnormalized_pull/",
+        "/home/umishra31/Fall2024/GSC_task/gsc_suite/temporal_policies/diffusion_models/v7_final_1/unnormalized_push/",
+        "/home/umishra31/Fall2024/GSC_task/gsc_suite/temporal_policies/diffusion_models/v7_final_1/unnormalized_pick_hook/"
+    ]
+    args.path = "/home/umishra31/Fall2024/GSC_task/gsc_suite/temporal_policies/plots/dummy_experiment/"
+    args.device = "cuda"
+    args.num_eval = 50
+    args.closed_loop = 1
+    args.seed = 0
+    args.gui = 0
+    args.verbose = 1
+    args.pddl_domain = None
+    args.pddl_problem = None
+    args.max_depth = 4
+    args.timeout = 10.0
 
     main(args)

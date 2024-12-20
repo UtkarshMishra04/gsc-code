@@ -98,7 +98,7 @@ def get_action_from_multi_diffusion(
     end_index: int = 24,
     state_dim: int = 96,
     action_dim: int = 4,
-    gamma: Sequence[float] = [1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+    gamma: Sequence[float] = [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.5, 1.0], # [1.0, 0.5, 1.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 0.5, 1.0],
     device: torch.device = "auto"
 ) -> np.ndarray:
 
@@ -112,7 +112,7 @@ def get_action_from_multi_diffusion(
         transition_model.to(device)
         classifier.to(device)
 
-    num_steps = 256
+    num_steps = 512
     sample_dim = 0
     for i in range(len(policies)):
         sample_dim += state_dim + action_dim
@@ -129,6 +129,9 @@ def get_action_from_multi_diffusion(
 
     all_observation_indices = []
     all_reverse_observation_indices = []
+
+    print("action_skeleton:", len(action_skeleton))
+    print("policies:", len(policies))
 
     for i in range(len(policies)):
         observation_indices = np.array(action_skeleton[i].get_policy_args()["observation_indices"])
@@ -156,6 +159,10 @@ def get_action_from_multi_diffusion(
         all_obs_ind.append(obs_ind)
         all_reverse_obs_ind.append(reverse_obs_ind)
 
+    # all_xt = []
+
+    # all_xt.append(xt.clone().detach().cpu().numpy())
+
     for t in tqdm.tqdm(range(num_steps, 0, -1)):
 
         total_epsilon = torch.zeros_like(xt)
@@ -177,25 +184,12 @@ def get_action_from_multi_diffusion(
                 #     pred_x0[:, :state_dim] = x0
 
                 pred_x0[:, -state_dim+36:] = pred_x0[:, 36:state_dim]
-
-            # if i == 0:
-            #     current_state = pred_x0[:, :state_dim].detach()
-            #     current_action = pred_x0[:, state_dim:state_dim+action_dim].detach()
-            #     for _ in range(5):
-            #         current_action = current_action.clone()
-            #         current_action.requires_grad = True
-            #         next_state = transition_model(torch.cat([current_state, current_action, obs_ind], dim=1))
-            #         target_next_state = pred_x0[:, state_dim+action_dim:]
-            #         loss = F.mse_loss(next_state, target_next_state)
-            #         loss.backward()
-            #         current_action = current_action.detach() - current_action.grad.detach()
-            #     pred_x0[:, state_dim:state_dim+action_dim] = current_action
             
             with torch.no_grad():
                 if use_transition_model: # or i % 2 == 0:
                     pred_x0[:, state_dim+action_dim:] = transition_model(torch.cat([pred_x0[:, :state_dim+action_dim], obs_ind], dim=1))
 
-                pred_x0 = torch.clip(pred_x0, -1, 1)
+                # pred_x0 = torch.clip(pred_x0, -1, 1)
 
                 epsilon = (sample - torch.sqrt(alpha_t)*pred_x0) / torch.sqrt(1 - alpha_t)
 
@@ -211,46 +205,32 @@ def get_action_from_multi_diffusion(
 
         pred_x0 = (xt - torch.sqrt(1 - alpha_t)*total_epsilon) / torch.sqrt(alpha_t)
 
-        # pred_x0[:, :state_dim] = transform_backward(pred_x0[:, :state_dim], reverse_observation_indices)
-        # pred_x0[:, state_dim+action_dim:] = transform_backward(pred_x0[:, state_dim+action_dim:], reverse_observation_indices)
-
         pred_x0[:, :state_dim] = mod_x0[:state_dim]
-
-        if t > 0.8*num_steps:
-            pred_x0[:, -state_dim:] = mod_x0[:state_dim]
 
         for i in range(len(indices_sdms)):
             pred_x0[:, indices_sdms[i][0]+12:indices_sdms[i][0]+end_index] = mod_x0[12:end_index]
             pred_x0[:, indices_sdms[i][0]+12*num_objects:indices_sdms[i][0]+state_dim] = mod_x0[12*num_objects:state_dim]
 
+            # if i < 5:
+            #     pred_x0[:, indices_sdms[i][0]+36:indices_sdms[i][0]+48] = mod_x0[36:48]
+
         pred_x0[:, -state_dim+12:-state_dim+end_index] = mod_x0[12:end_index]
         pred_x0[:, -state_dim+12*num_objects:] = mod_x0[12*num_objects:]
 
-        if t > 0.25*num_steps:
-            action_place1 = pred_x0[:, (state_dim+action_dim)+state_dim:2*(state_dim+action_dim)]
-            action_place2 = pred_x0[:, 3*(state_dim+action_dim)+state_dim:4*(state_dim+action_dim)]
+        # for i in range(len(indices_dms)):
+        #     state_1 = pred_x0[:, indices_dms[i][0]:indices_dms[i][0]+state_dim].clone()
+        #     state_2 = pred_x0[:, indices_dms[i][1]-state_dim:indices_dms[i][1]].clone()
 
-            for _ in range(5):
+        #     state_1 = transform_forward(state_1, all_observation_indices[i])
+        #     state_2 = transform_forward(state_2, all_observation_indices[i])
 
-                action_place1 = action_place1.clone()
+        #     state_2[:, 36:] = state_1[:, 36:]
 
-                action_place1.requires_grad = True
+        #     state_1 = transform_backward(state_1, all_reverse_observation_indices[i])
+        #     state_2 = transform_backward(state_2, all_reverse_observation_indices[i])
 
-                # maximize distance from origin
-
-                distance = torch.norm(action_place1[:, :2], dim=1, keepdim=True).mean()
-
-                distance.backward()
-
-                action_place1_grad = action_place1.grad.detach()
-
-                action_place1 = action_place1.detach()
-
-                action_place1[:, :2] = action_place1[:, :2] - action_place1_grad[:, :2]
-
-            pred_x0[:, (state_dim+action_dim)+state_dim:2*(state_dim+action_dim)] = action_place1
-            pred_x0[:, 3*(state_dim+action_dim)+state_dim:4*(state_dim+action_dim)] = action_place2
-
+        #     pred_x0[:, indices_dms[i][0]:indices_dms[i][0]+state_dim] = state_1
+        #     pred_x0[:, indices_dms[i][1]-state_dim:indices_dms[i][1]] = state_2
             
         with torch.no_grad():
 
@@ -259,6 +239,17 @@ def get_action_from_multi_diffusion(
             new_epsilon = torch.randn_like(total_epsilon)
 
             xt = torch.sqrt(alpha_tm1)*pred_x0 + torch.sqrt(1 - alpha_tm1)*new_epsilon
+
+            # all_xt.append(xt.clone().detach().cpu().numpy())
+
+    action = xt[:, 4*(state_dim+action_dim)+state_dim:5*(state_dim+action_dim)].clone()
+
+    action[:, 0] = -action[:, 0]
+    action[:, 1] = -action[:, 1]
+
+    action = torch.clip(action, -1, 1)
+
+    xt[:,4*(state_dim+action_dim)+state_dim:5*(state_dim+action_dim)] = action
 
     xt = xt.detach().cpu().numpy()
 
@@ -287,6 +278,18 @@ def get_action_from_multi_diffusion(
 
     xt = xt[sorted_indices]
 
+    # all_xts = np.concatenate([all_xt[i][sorted_indices][:, None, :] for i in range(len(all_xt))], axis=1)
+
+    # all_states = []
+
+    # for i in range(len(indices_sdms)):    
+    #     print("indices_sdms[i]:", indices_sdms[i])
+    #     all_states.append(all_xts[:, :, indices_sdms[i][0]:indices_sdms[i][1]]) 
+
+    # all_states.append(all_xts[:, :, -state_dim:])
+
+    # all_xts_states = np.concatenate([all_states[i].reshape(5, 257, 1, 8, 12) for i in range(len(all_states))], axis=2)
+    
     all_states = []
     all_actions = []
 
@@ -298,235 +301,34 @@ def get_action_from_multi_diffusion(
 
     return all_actions, all_states
 
-def get_action_from_two_diffusion(
-    policy1,
-    policy2,
-    diffusion_model1: Diffusion,
-    diffusion_model2: Diffusion,
-    transition_model1: TransitionModel,
-    transition_model2: TransitionModel,
-    classifier1: ScoreModelMLP,
-    classifier2: ScoreModelMLP,
-    obs0: torch.Tensor,
-    observation_indices1: np.ndarray,
-    observation_indices2: np.ndarray,
-    use_transition_model: bool = True,
-    num_samples: int = 5,
-    num_objects: int = 4,
-    state_dim: int = 96,
-    action_dim: int = 4,
-    gamma: float = 0.0,
-    device: torch.device = "auto"
-) -> np.ndarray:
-
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device)
-
-    diffusion_model1.to(device)
-    diffusion_model2.to(device)
-    transition_model1.to(device)
-    transition_model2.to(device)
-    classifier1.to(device)
-    classifier2.to(device)
-
-    num_steps = 256
-    sample_dim = state_dim + action_dim + state_dim + action_dim + state_dim
-
-    xt = torch.zeros(num_samples, sample_dim).to(device)
-
-    reverse_observation_indices1 = np.zeros_like(observation_indices1)
-    reverse_observation_indices2 = np.zeros_like(observation_indices2)
-
-    for i in range(len(observation_indices1)):
-        reverse_observation_indices1[observation_indices1[i]] = i
-
-    for i in range(len(observation_indices2)):
-        reverse_observation_indices2[observation_indices2[i]] = i
-
-    obs0 = np.array(obs0)*2
-    x0 = torch.Tensor(obs0).to(device)
-
-    obs_ind1 = torch.Tensor(observation_indices1).to(device).unsqueeze(0).repeat(num_samples, 1)
-    obs_ind2 = torch.Tensor(observation_indices2).to(device).unsqueeze(0).repeat(num_samples, 1)
-
-    rev_obs_ind1 = torch.Tensor(reverse_observation_indices1).to(device).unsqueeze(0).repeat(num_samples, 1)
-    rev_obs_ind2 = torch.Tensor(reverse_observation_indices2).to(device).unsqueeze(0).repeat(num_samples, 1)
-
-    sde1, ones1 = diffusion_model1.configure_sdes(num_steps=num_steps, x_T=xt[:, :state_dim+action_dim+state_dim], num_samples=num_samples)
-    sde2, ones2 = diffusion_model2.configure_sdes(num_steps=num_steps, x_T=xt[:, state_dim+action_dim:], num_samples=num_samples)
-
-    for t in tqdm.tqdm(range(num_steps, 0, -1)):
-
-        total_epsilon = torch.zeros_like(xt)
-
-        sample = xt[:, :state_dim+action_dim+state_dim].clone()
-        sample[:, :state_dim] = transform_forward(sample[:, :state_dim], observation_indices1)
-        sample[:, state_dim+action_dim:state_dim+action_dim+state_dim] = transform_forward(sample[:, state_dim+action_dim:state_dim+action_dim+state_dim], observation_indices1)
-
-        epsilon1, alpha_t, alpha_tm1 = sde1.sample_epsilon(t * ones1, sample, obs_ind1)
-        
-        pred_x0 = (sample - torch.sqrt(1 - alpha_t)*epsilon1) / torch.sqrt(alpha_t)
-        
-        pred_x0[:, :state_dim] = x0
-        if use_transition_model:
-            pred_x0[:, state_dim+action_dim:] = transition_model1(torch.cat([pred_x0[:, :state_dim+action_dim], obs_ind1], dim=1))
-
-        pred_x0 = torch.clip(pred_x0, -1, 1)
-
-        epsilon1 = (sample - torch.sqrt(alpha_t)*pred_x0) / torch.sqrt(1 - alpha_t)
-
-        epsilon1[:, :state_dim] = transform_backward(epsilon1[:, :state_dim], reverse_observation_indices1)
-        epsilon1[:, state_dim+action_dim:state_dim+action_dim+state_dim] = transform_backward(epsilon1[:, state_dim+action_dim:state_dim+action_dim+state_dim], reverse_observation_indices1)
-
-        total_epsilon[:, :state_dim+action_dim+state_dim] += epsilon1
-
-        sample = xt[:, state_dim+action_dim:].clone()
-        sample[:, :state_dim] = transform_forward(sample[:, :state_dim], observation_indices2)
-        sample[:, state_dim+action_dim:state_dim+action_dim+state_dim] = transform_forward(sample[:, state_dim+action_dim:state_dim+action_dim+state_dim], observation_indices2)
-
-        epsilon2, alpha_t, alpha_tm1 = sde2.sample_epsilon(t * ones2, sample, obs_ind2)
-        
-        pred_x0 = (sample - torch.sqrt(1 - alpha_t)*epsilon2) / torch.sqrt(alpha_t)
-        
-        if use_transition_model:
-            pred_x0[:, state_dim+action_dim:] = transition_model2(torch.cat([pred_x0[:, :state_dim+action_dim], obs_ind2], dim=1))
-
-        pred_x0 = torch.clip(pred_x0, -1, 1)
-
-        epsilon2 = (sample - torch.sqrt(alpha_t)*pred_x0) / torch.sqrt(1 - alpha_t)
-
-        epsilon2[:, :state_dim] = transform_backward(epsilon2[:, :state_dim], reverse_observation_indices2)
-        epsilon2[:, state_dim+action_dim:state_dim+action_dim+state_dim] = transform_backward(epsilon2[:, state_dim+action_dim:state_dim+action_dim+state_dim], reverse_observation_indices2)
-
-        total_epsilon[:, state_dim+action_dim:] += epsilon2
-
-        total_epsilon[:, state_dim+action_dim:state_dim+action_dim+state_dim] = gamma*epsilon1[:, -state_dim:] + (1-gamma)*epsilon2[:, :state_dim]
-
-        pred_x0 = (xt - torch.sqrt(1 - alpha_t)*total_epsilon) / torch.sqrt(alpha_t)
-
-        # pred_x0[:, :state_dim] = transform_backward(pred_x0[:, :state_dim], reverse_observation_indices)
-        # pred_x0[:, state_dim+action_dim:] = transform_backward(pred_x0[:, state_dim+action_dim:], reverse_observation_indices)
-
-        mod_x0 = transform_backward(x0, reverse_observation_indices1)
-        pred_x0[:, state_dim+action_dim+12:state_dim+action_dim+24] = mod_x0[12:24]
-        pred_x0[:, state_dim+action_dim+12*num_objects:state_dim+action_dim+state_dim] = mod_x0[12*num_objects:state_dim]
-
-        pred_x0[:, state_dim+action_dim+state_dim+action_dim+12:state_dim+action_dim+state_dim+action_dim+24] = mod_x0[12:24]
-        pred_x0[:, state_dim+action_dim+state_dim+action_dim+12*num_objects:state_dim+action_dim+state_dim+action_dim+state_dim] = mod_x0[12*num_objects:state_dim]
-        
-        new_epsilon = torch.randn_like(total_epsilon)
-
-        xt = torch.sqrt(alpha_tm1)*pred_x0 + torch.sqrt(1 - alpha_tm1)*new_epsilon
-
-    xt = xt.detach().cpu().numpy()
-
-    state1 = xt[:, :state_dim]
-    action1 = xt[:, state_dim:state_dim+action_dim]
-    state2 = xt[:, state_dim+action_dim:state_dim+action_dim+state_dim]
-    action2 = xt[:, state_dim+action_dim+state_dim:state_dim+action_dim+state_dim+action_dim]
-    state3 = xt[:, state_dim+action_dim+state_dim+action_dim:]
-
-    scores = classifier2(torch.cat([transform_forward(torch.Tensor(state3).to(device), observation_indices2), obs_ind2], dim=1)).detach().cpu().numpy().squeeze()
-
-    print("scores:", scores)
-
-    sorted_indices = np.argsort(scores)[::-1]
-
-    xt = xt[sorted_indices]
-
-    state1 = xt[:, :state_dim]*0.5
-    action1 = xt[:, state_dim:state_dim+action_dim]
-    state2 = xt[:, state_dim+action_dim:state_dim+action_dim+state_dim]*0.5
-    action2 = xt[:, state_dim+action_dim+state_dim:state_dim+action_dim+state_dim+action_dim]
-    state3 = xt[:, state_dim+action_dim+state_dim+action_dim:]*0.5
-
-    return [action1, action2], [state1, state2, state3]
-
-def get_action_from_diffusion(
-    policy,
+@torch.no_grad()
+def diffusion_forward(
     diffusion_model: Diffusion,
-    transition_model: TransitionModel,
-    classifier: ScoreModelMLP,
-    obs0: torch.Tensor,
-    observation_indices: np.ndarray,
-    use_transition_model: bool = True,
-    num_samples: int = 5,
-    state_dim: int = 96,
-    action_dim: int = 4,
-    num_objects: int = 4,
+    samples: np.ndarray,
     device: torch.device = "auto"
-) -> np.ndarray:
-    """Samples an action from the diffusion model."""
-    # Sample action from diffusion model.
+):
 
     if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    device = torch.device(device)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     num_steps = 256
-    sample_dim = state_dim + action_dim + state_dim
 
-    xt = torch.zeros(num_samples, sample_dim).to(device)
+    samples = torch.Tensor(samples).to(device)
+    diffusion_model = diffusion_model.to(device)
 
-    reverse_observation_indices = np.zeros_like(observation_indices)
+    sde, ones = diffusion_model.configure_sdes_forward(num_steps=num_steps, x_0=samples)
 
-    for i in range(len(observation_indices)):
-        reverse_observation_indices[observation_indices[i]] = i
+    all_samples = [samples.cpu().unsqueeze(1).numpy()]
 
-    obs0 = np.array(obs0)*2
-    x0 = torch.Tensor(obs0).to(device)
+    for t in range(num_steps):
 
-    obs_ind = torch.Tensor(observation_indices).to(device).unsqueeze(0).repeat(num_samples, 1)
-    rev_obs_ind = torch.Tensor(reverse_observation_indices).to(device).unsqueeze(0).repeat(num_samples, 1)
+        new_samples = diffusion_model.gensde.base_sde.sample(t*ones, samples)
 
-    sde, ones = diffusion_model.configure_sdes(num_steps=num_steps, x_T=xt, num_samples=num_samples)
+        all_samples.append(new_samples.cpu().unsqueeze(1).numpy())
 
-    for t in tqdm.tqdm(range(num_steps, 0, -1)):
+    all_samples = np.concatenate(all_samples, axis=0)
 
-        sample = xt.clone()
-        sample[:, :state_dim] = transform_forward(sample[:, :state_dim], observation_indices)
-        sample[:, state_dim+action_dim:] = transform_forward(sample[:, state_dim+action_dim:], observation_indices)
-
-        epsilon, alpha_t, alpha_tm1 = sde.sample_epsilon(t * ones, sample, obs_ind)
-        
-        pred_x0 = (sample - torch.sqrt(1 - alpha_t)*epsilon) / torch.sqrt(alpha_t)
-        
-        pred_x0[:, :state_dim] = x0
-        if use_transition_model:
-            pred_x0[:, state_dim+action_dim:] = transition_model(torch.cat([pred_x0[:, :state_dim+action_dim], obs_ind], dim=1))
-
-        pred_x0 = torch.clip(pred_x0, -1, 1)
-
-        epsilon = (sample - torch.sqrt(alpha_t)*pred_x0) / torch.sqrt(1 - alpha_t)
-
-        new_epsilon = torch.randn_like(epsilon)
-
-        pred_x0[:, :state_dim] = transform_backward(pred_x0[:, :state_dim], reverse_observation_indices)
-        pred_x0[:, state_dim+action_dim:] = transform_backward(pred_x0[:, state_dim+action_dim:], reverse_observation_indices)
-
-        mod_x0 = transform_backward(x0, reverse_observation_indices)
-        pred_x0[:, state_dim+action_dim+12:state_dim+action_dim+24] = mod_x0[12:24]
-        pred_x0[:, state_dim+action_dim+12*num_objects:state_dim+action_dim+state_dim] = mod_x0[12*num_objects:state_dim]
-        
-        xt = torch.sqrt(alpha_tm1)*pred_x0 + torch.sqrt(1 - alpha_tm1)*new_epsilon
-
-    xt = xt.detach().cpu().numpy()
-
-    initial_state, action, final_state = xt[:, :state_dim], xt[:, state_dim:state_dim+action_dim], xt[:, state_dim+action_dim:]
-
-    scores = classifier(torch.cat([torch.Tensor(initial_state).to(device), obs_ind], dim=1)).detach().cpu().numpy().squeeze()
-
-    print("scores:", scores)
-
-    sorted_indices = np.argsort(scores)[::-1]
-
-    xt = xt[sorted_indices]
-
-    initial_state, action, final_state = xt[:, :state_dim], xt[:, state_dim:state_dim+action_dim], xt[:, state_dim+action_dim:]
-
-    return action, [initial_state*0.5, final_state*0.5]
+    return all_samples[:, 0, :][::-1][-50:]
 
 def evaluate_episodes(
     env: envs.Env,
@@ -582,12 +384,15 @@ def evaluate_episodes(
         if f.suffix == ".gif" or f.suffix == ".png":
             f.unlink()
 
+    all_rewards = None
+
     for ep in pbar:
         # Evaluate episode.
         observation, reset_info = env.reset() #seed=seed)
         print("reset_info:", reset_info, "env.task", env.task)
         seed = reset_info["seed"]
         initial_observation = observation
+        init_state = env.get_state()
         observation_indices = reset_info["policy_args"]["observation_indices"]
         print("primitive:", env.get_primitive(), env.action_skeleton[0].get_policy_args()["observation_indices"])
         print("reset_info:", reset_info)
@@ -642,6 +447,11 @@ def evaluate_episodes(
             device=device
         )
 
+        import pickle
+
+        with open("all_xts_states.pkl", "rb") as f:
+            all_xts_states = pickle.load(f)*0.5
+
         if verbose:
             print("observation:", observation_str(env, observation))
             print("observation tensor:", observation)
@@ -656,6 +466,14 @@ def evaluate_episodes(
             env.set_observation(initial_observation)
 
             env.record_start()
+
+            rewards = []
+
+            rolling_images = []
+
+            rolling_images.append(env.render())
+
+            rolling_observations = [obs0]
 
             for i, action in enumerate(actions):
 
@@ -673,13 +491,26 @@ def evaluate_episodes(
                 print(f"Action for: {skills[target_skill_sequence[i]]}, reward: {reward}, terminated: {terminated}, truncated: {truncated}")
 
                 rewards.append(reward)
+
+                rolling_images.append(env.render())
+
+                rolling_observations.append(action[j])
+                rolling_observations.append(obs_preprocessor(observation, reset_info["policy_args"]))
+
+                # if reward == 0:
+                #     break
+                    
                 done = terminated or truncated
 
-            success = np.prod(rewards) > 0
+            # success = np.prod(rewards) > 0
+            success = rewards[-1] > 0
 
             env.record_stop()
 
             if success:
+
+                current_sample = np.concatenate(rolling_observations, axis=0)[None, :]
+
                 env.record_save(path / f"eval_{ep}_{i}_{j}_success.gif", reset=True)
 
                 imgs = []
@@ -692,7 +523,102 @@ def evaluate_episodes(
 
                 imgs = np.concatenate(imgs, axis=1)
 
-                Image.fromarray(imgs).save(path / f"eval_{ep}_{i}_{j}_success.png")              
+                Image.fromarray(imgs).save(path / f"eval_{ep}_{i}_{j}_success.png")   
+
+                rolling_images = np.concatenate(rolling_images, axis=1)
+
+                Image.fromarray(rolling_images).save(path / f"eval_{ep}_{i}_{j}_success_rolling.png") 
+
+                all_diffusion = all_xts_states[j]
+
+                # for state_num in range(all_diffusion.shape[1]):
+                #     for timestep in range(all_diffusion.shape[0]):
+                #         curr_state = all_diffusion[timestep, state_num]
+                #         curr_state = policy.encoder.unnormalize(torch.Tensor(curr_state).unsqueeze(0).to(device)).detach().cpu().numpy()[0]
+                #         env.set_observation(curr_state)
+                #         img = env.render()
+
+                #         save_path = path / f"state_{j}_{state_num}"
+
+                #         if not save_path.exists():
+                #             save_path.mkdir()
+
+                #         Image.fromarray(img).save(save_path / f"timestep_{timestep}.png")
+
+                all_diffusion_samples = diffusion_forward(
+                        diffusion_model_transition,
+                        current_sample
+                    )
+
+                all_images_gif = []
+
+                for k in tqdm.tqdm(range(all_diffusion_samples.shape[0])):
+                    print("k:", k)
+                    print("all_diffusion_samples[k]:", all_diffusion_samples[k].shape)
+
+                    states = [
+                        policy.encoder.decode(torch.Tensor(all_diffusion_samples[k, 100*l:100*l+96]).unsqueeze(0).to(device), reset_info["policy_args"]).cpu().numpy()
+                        for l in range(8)
+                    ]                
+
+                    actions = [
+                        all_diffusion_samples[k, 100*l+96:100*l+100]
+                        for l in range(7)
+                    ]
+
+                    current_image = []
+
+                    for state in states:
+                        state[1] = initial_observation[1]
+
+                        env.reset(seed=seed)
+                        env.set_observation(state)
+                        img = env.render()
+                        img_first = np.array(img, dtype=np.uint8)
+
+                        current_image.append(img_first)
+
+                    current_image = np.concatenate(current_image, axis=1)
+
+                    all_images_gif.append(Image.fromarray(current_image))
+
+                for _ in range(50):
+                    all_images_gif.append(Image.fromarray(current_image))
+
+                all_images_gif[0].save(path / f"eval_{ep}_{i}_{j}_success_diffusion.gif", save_all=True, append_images=all_images_gif[1:], duration=100, loop=0)
+                all_images_gif[-1].save(path / f"eval_{ep}_{i}_{j}_success_diffusion_last.png")
+
+                env.reset(seed=seed)
+
+                env.record_start()
+
+                for k in tqdm.tqdm([0, 10, 20, 30, 40, 49]):
+                    print("k:", k)
+                    print("all_diffusion_samples[k]:", all_diffusion_samples[k].shape)
+
+                    states = [
+                        policy.encoder.decode(torch.Tensor(all_diffusion_samples[k, 100*l:100*l+96]).unsqueeze(0).to(device), reset_info["policy_args"]).cpu().numpy()
+                        for l in range(8)
+                    ]                
+
+                    actions = [
+                        all_diffusion_samples[k, 100*l+96:100*l+100]
+                        for l in range(7)
+                    ]
+
+                    env.reset(seed=seed)
+
+                    for s, skill in enumerate(env.action_skeleton):
+                        
+                        env.set_primitive(skill)
+                        observation, reward, terminated, truncated, step_info = env.step(actions[s])
+
+                        if reward == 0:
+                            break
+
+                env.record_stop()
+
+                env.record_save(path / f"eval_{ep}_{i}_{j}_success_diffusion_all.gif", reset=True)
 
             else:
                 env.record_save(path / f"eval_{ep}_{i}_{j}_fail.gif", reset=True)
@@ -709,16 +635,24 @@ def evaluate_episodes(
 
                 Image.fromarray(imgs).save(path / f"eval_{ep}_{i}_{j}_fail.png")   
 
+                rolling_images = np.concatenate(rolling_images, axis=1)
+
+                Image.fromarray(rolling_images).save(path / f"eval_{ep}_{i}_{j}_fail_rolling.png")
+
             if success:
-                rewards = []
                 env.set_observation(initial_observation)
+                break
             else:
-                rewards = []
                 env.set_observation(initial_observation)
+
+        if all_rewards is None:
+            all_rewards = np.array(rewards)
+        else:
+            all_rewards += np.array(rewards)
 
         num_successes += success
         pbar.set_postfix(
-            {"rewards": rewards, "successes": f"{num_successes} / {num_episodes}"}
+            {"rewards": all_rewards, "successes": f"{num_successes} / {num_episodes}"}
         )
 
     # save results as json
@@ -772,7 +706,7 @@ def evaluate_diffusion(
         env = None
         assert False
 
-    all_skills = ["pick", "place", "pull", "push"]
+    all_skills = ["pick", "place", "pull", "push", "pick_hook"]
     all_policies = {}
     all_diffusion_models = {}
     all_diffusion_state_models = {}
@@ -839,9 +773,9 @@ def evaluate_diffusion(
         all_classifier_models[all_skills[i]] = score_model_classifier
         all_observation_preprocessors[all_skills[i]] = observation_preprocessor
 
-    target_skill_sequence = [0, 1, 0, 3]
+    target_skill_sequence = [4, 2, 1, 0, 1, 4, 3] #1, 0, 1, 0, 3]
     target_length = len(target_skill_sequence)
-    num_episodes = 5
+    num_episodes = num_eval
 
     evaluate_episodes(
         env=env,
